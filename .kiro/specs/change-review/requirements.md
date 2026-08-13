@@ -40,6 +40,7 @@ The end-to-end evidence and approval flow is:
 - **Finding**: A supported rule violation (SEC-001, SEC-002, REL-001, or BR-001) identified by comparing exactly two plan JSON files.
 - **Human Approver**: The person who reviews a `CHANGE_BLOCKED` result and explicitly approves or rejects the proposed remediation.
 - **Test Suite**: The automated test code, written using only the Python 3 standard library, that verifies each supported rule and the remediation path.
+- **Reviewer Result**: The outcome a reviewer (Security Reviewer or Reliability Reviewer) returns for a comparison cycle: `PASS` (evaluation completed and no supported finding was identified), `FAIL` (evaluation completed and a supported finding was identified), or `INCOMPLETE` (the reviewer could not complete the required evaluation).
 
 ## Out of Scope
 
@@ -115,6 +116,9 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 4. THE Security Reviewer SHALL NOT execute remediation.
 5. THE Security Reviewer SHALL NOT report AWS security recommendations outside SEC-001 and SEC-002.
 6. IF evidence is insufficient to prove a SEC-001 or SEC-002 transition, THEN THE Security Reviewer SHALL NOT report a finding.
+7. WHEN the Security Reviewer completes evaluation of SEC-001 and SEC-002 and identifies no supported finding, THE Security Reviewer SHALL return `PASS`.
+8. WHEN the Security Reviewer completes evaluation of SEC-001 or SEC-002 and identifies a supported finding, THE Security Reviewer SHALL return `FAIL`.
+9. IF the Security Reviewer fails to complete required evaluation of SEC-001 or SEC-002, THEN THE Security Reviewer SHALL return `INCOMPLETE` and SHALL NOT report any finding for the incomplete evaluation.
 
 ### Requirement 6: Reliability Reviewer Scope and Constraints
 
@@ -128,7 +132,9 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 4. THE Reliability Reviewer SHALL NOT execute remediation.
 5. THE Reliability Reviewer SHALL NOT report reliability or availability recommendations outside REL-001 and BR-001.
 6. IF evidence is insufficient to prove a REL-001 or BR-001 transition, THEN THE Reliability Reviewer SHALL NOT report a finding.
-7. IF the Reliability Reviewer fails to complete evaluation of REL-001 or BR-001, THEN THE Reliability Reviewer SHALL NOT report any finding for the incomplete evaluation.
+7. WHEN the Reliability Reviewer completes evaluation of REL-001 and BR-001 and identifies no supported finding, THE Reliability Reviewer SHALL return `PASS`.
+8. WHEN the Reliability Reviewer completes evaluation of REL-001 or BR-001 and identifies a supported finding, THE Reliability Reviewer SHALL return `FAIL`.
+9. IF the Reliability Reviewer fails to complete required evaluation of REL-001 or BR-001, THEN THE Reliability Reviewer SHALL return `INCOMPLETE` and SHALL NOT report any finding for the incomplete evaluation.
 
 ### Requirement 7: Independent Parallel Review
 
@@ -148,9 +154,10 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 
 1. WHEN one or more supported findings exist, THE Orchestrator SHALL report `CHANGE_BLOCKED`.
 2. WHEN reporting `CHANGE_BLOCKED`, THE Orchestrator SHALL present, for each finding, the rule ID, severity, affected resource, baseline value, candidate value, reason, and proposed remediation.
-3. THE Orchestrator SHALL NOT modify `terraform/main.tf` until the Human Approver explicitly approves the proposed remediation.
-4. IF the Human Approver denies approval, THEN THE Orchestrator SHALL leave `terraform/main.tf` unmodified and SHALL report `REMEDIATION_REJECTED`.
-5. IF the Human Approver denies approval, THEN THE Orchestrator SHALL NOT invoke the Remediator.
+3. THE Orchestrator SHALL map the severity of each finding as follows: SEC-001 to `CRITICAL`, SEC-002 to `CRITICAL`, REL-001 to `HIGH`, and BR-001 to `CRITICAL`.
+4. THE Orchestrator SHALL NOT modify `terraform/main.tf` until the Human Approver explicitly approves the proposed remediation.
+5. IF the Human Approver denies approval, THEN THE Orchestrator SHALL leave `terraform/main.tf` unmodified and SHALL report `REMEDIATION_REJECTED`.
+6. IF the Human Approver denies approval, THEN THE Orchestrator SHALL NOT invoke the Remediator.
 
 ### Requirement 9: Deterministic Remediation
 
@@ -175,8 +182,11 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 1. AFTER remediation completes, THE Terraform Plan Tool SHALL generate `artifacts/remediated-plan.json` using real Terraform commands.
 2. THE Orchestrator SHALL invoke the Security Reviewer and the Reliability Reviewer to compare the Baseline Plan with the Remediated Plan.
 3. THE ChangeGuard System SHALL report `SAFE_TO_SHIP` only when Terraform execution succeeds and both the Security Reviewer and the Reliability Reviewer return `PASS`.
-4. THE ChangeGuard System SHALL NOT rely solely on `terraform validate` to confirm remediation.
-5. WHEN reporting `SAFE_TO_SHIP`, THE ChangeGuard System SHALL state that the verdict reflects only the four supported rule IDs and does not indicate the infrastructure is universally safe or production-ready.
+4. IF the Security Reviewer or the Reliability Reviewer returns `FAIL`, THEN THE ChangeGuard System SHALL NOT report `SAFE_TO_SHIP`.
+5. IF the Security Reviewer or the Reliability Reviewer returns `INCOMPLETE`, THEN THE ChangeGuard System SHALL NOT report `SAFE_TO_SHIP`.
+6. IF Terraform plan evidence generation fails or any tool invoked by the ChangeGuard System reports an error, THEN THE ChangeGuard System SHALL NOT report `SAFE_TO_SHIP`.
+7. THE ChangeGuard System SHALL NOT rely solely on `terraform validate` to confirm remediation.
+8. WHEN reporting `SAFE_TO_SHIP`, THE ChangeGuard System SHALL state that the verdict reflects only the four supported rule IDs and does not indicate the infrastructure is universally safe or production-ready.
 
 ### Requirement 11: Safety Hook Enforcement
 

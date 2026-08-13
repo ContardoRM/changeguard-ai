@@ -52,8 +52,8 @@ flowchart TB
     Orchestrator -->|"2. invoke concurrently"| RelRev
     SecRev -->|reads only| Artifacts
     RelRev -->|reads only| Artifacts
-    SecRev -->|"findings/PASS"| Orchestrator
-    RelRev -->|"findings/PASS"| Orchestrator
+    SecRev -->|"PASS / FAIL / INCOMPLETE"| Orchestrator
+    RelRev -->|"PASS / FAIL / INCOMPLETE"| Orchestrator
 
     Orchestrator -->|"3. CHANGE_BLOCKED + payload"| Approver
     Approver -->|"4. approve / reject"| Orchestrator
@@ -100,14 +100,14 @@ sequenceDiagram
     Note over O,RR: Phase 3 - Independent parallel review
     par Security Reviewer
         O->>SR: evaluate(baseline-plan.json, candidate-plan.json)
-        SR-->>O: SEC-001 / SEC-002 findings, or PASS
+        SR-->>O: PASS, or FAIL with SEC-001 / SEC-002 finding(s), or INCOMPLETE
     and Reliability Reviewer
         O->>RR: evaluate(baseline-plan.json, candidate-plan.json)
-        RR-->>O: REL-001 / BR-001 findings, or PASS
+        RR-->>O: PASS, or FAIL with REL-001 / BR-001 finding(s), or INCOMPLETE
     end
     O->>O: aggregate (no rule evaluation performed here)
 
-    alt one or more findings
+    alt one or more findings (FAIL) or any INCOMPLETE
         O->>H: CHANGE_BLOCKED { rule_id, severity, resource, baseline_value, candidate_value, reason, proposed_remediation }
         alt approved
             H->>O: approve
@@ -120,17 +120,17 @@ sequenceDiagram
             PT-->>O: remediated-plan.json written
             par Security re-review
                 O->>SR: evaluate(baseline-plan.json, remediated-plan.json)
-                SR-->>O: PASS / FAIL
+                SR-->>O: PASS / FAIL / INCOMPLETE
             and Reliability re-review
                 O->>RR: evaluate(baseline-plan.json, remediated-plan.json)
-                RR-->>O: PASS / FAIL
+                RR-->>O: PASS / FAIL / INCOMPLETE
             end
-            O->>Dev: SAFE_TO_SHIP (scope caveat: 4 rules only)
+            O->>Dev: SAFE_TO_SHIP only if both PASS and Terraform execution succeeded (scope caveat: 4 rules only); otherwise blocked
         else rejected
             H->>O: reject
             O->>Dev: REMEDIATION_REJECTED (terraform/main.tf left unmodified, Remediator never invoked)
         end
-    else no findings
+    else both PASS
         O->>Dev: SAFE_TO_SHIP (candidate as-is, scope caveat: 4 rules only)
     end
 ```
@@ -196,7 +196,7 @@ For every rule, if the resource address is missing from either plan, if the fiel
 ### Orchestrator (Kiro Crew agent — coordination-only)
 
 - **Role**: drives the workflow shown in the sequence diagram above: requests plan generation, invokes both reviewers, aggregates their results, runs the human approval gate, delegates remediation, triggers post-remediation verification, and emits the final verdict.
-- **Allowed inputs**: reviewer results (finding lists or PASS), human approval/rejection decision, Terraform Plan Tool success/failure status.
+- **Allowed inputs**: reviewer `ReviewResult`s (`PASS`, `FAIL` with findings, or `INCOMPLETE`), human approval/rejection decision, Terraform Plan Tool success/failure status.
 - **Allowed outputs**: invocations of the Terraform Plan Tool, invocations of Security Reviewer / Reliability Reviewer / Remediator, the `CHANGE_BLOCKED` / `SAFE_TO_SHIP` / `REMEDIATION_REJECTED` payloads presented to the human.
 - **Permission boundary**: coordination-only. It never reads plan JSON to make a rule decision, never writes to `terraform/main.tf`, and never invokes `apply_remediation.py` directly (Requirement 4.8). It is the only agent allowed to invoke the Remediator, and only after receiving an explicit approval signal.
 
@@ -204,15 +204,15 @@ For every rule, if the resource address is missing from either plan, if the fiel
 
 - **Role**: evaluates SEC-001 and SEC-002 only, using the JSON paths defined above.
 - **Allowed inputs**: paths to exactly two plan JSON artifacts (Baseline + Candidate, or Baseline + Remediated), supplied by the Orchestrator.
-- **Allowed outputs**: a list of zero or more findings, each shaped as the `CHANGE_BLOCKED` finding record (see "Human Approval Gate" below), restricted to `rule_id ∈ {SEC-001, SEC-002}`.
-- **Permission boundary**: read-only. It cannot write any file, cannot execute `apply_remediation.py` or any Terraform command, and cannot report any security observation outside SEC-001/SEC-002 (Requirement 5).
+- **Allowed outputs**: a `ReviewResult` with `status ∈ {PASS, FAIL, INCOMPLETE}` (Requirements 5.7, 5.8, 5.9) and, when `status` is `FAIL`, a list of one or more findings, each shaped as the `CHANGE_BLOCKED` finding record (see "Human Approval Gate" below), restricted to `rule_id ∈ {SEC-001, SEC-002}`.
+- **Permission boundary**: read-only. It cannot write any file, cannot execute `apply_remediation.py` or any Terraform command, and cannot report any security observation outside SEC-001/SEC-002 (Requirement 5). If evaluation of SEC-001 or SEC-002 fails to complete (exception, timeout, malformed input encountered mid-check), it must return `INCOMPLETE` and must not emit a finding — or a `PASS` — for the rule that didn't finish (Requirement 5.9) — see "Error Handling."
 
 ### Reliability Reviewer (Kiro Crew agent — read-only)
 
 - **Role**: evaluates REL-001 and BR-001 only, using the JSON paths defined above.
 - **Allowed inputs**: the same two-artifact-path input shape as the Security Reviewer.
-- **Allowed outputs**: a list of zero or more findings restricted to `rule_id ∈ {REL-001, BR-001}`.
-- **Permission boundary**: read-only, identical constraints to the Security Reviewer, plus: if evaluation of REL-001 or BR-001 fails to complete (exception, timeout, malformed input encountered mid-check), it must not emit a finding for the rule that didn't finish (Requirement 6.7) — see "Error Handling."
+- **Allowed outputs**: a `ReviewResult` with `status ∈ {PASS, FAIL, INCOMPLETE}` (Requirements 6.7, 6.8, 6.9) and, when `status` is `FAIL`, a list of one or more findings restricted to `rule_id ∈ {REL-001, BR-001}`.
+- **Permission boundary**: read-only, identical constraints to the Security Reviewer, plus: if evaluation of REL-001 or BR-001 fails to complete (exception, timeout, malformed input encountered mid-check), it must return `INCOMPLETE` and must not emit a finding — or a `PASS` — for the rule that didn't finish (Requirement 6.9) — see "Error Handling."
 
 ### Remediator (Kiro Crew agent — post-approval only, decides WHAT)
 
@@ -226,19 +226,19 @@ For every rule, if the resource address is missing from either plan, if the fiel
 Security Reviewer and Reliability Reviewer are modeled as two independent Kiro Crew agent invocations issued by the Orchestrator within the same orchestration step. Each invocation:
 
 - receives only the two artifact file paths for that comparison cycle as input (no shared mutable state, no reference to the other reviewer's invocation or result);
-- runs to completion and returns a self-contained result (finding list or PASS) with no ordering dependency on the other reviewer.
+- runs to completion and returns a self-contained `ReviewResult` (`PASS`, `FAIL` with findings, or `INCOMPLETE`) with no ordering dependency on the other reviewer.
 
 Because there is no data dependency between the two calls, the Orchestrator issues them as independent, concurrently-invokable Kiro Crew agent tasks in the same turn — the same "independent calls with no dependency between them run together" pattern Kiro Crew uses for any set of unrelated agent/tool invocations — rather than sequentially awaiting one before starting the other. This satisfies Requirement 7: neither reviewer's finding set is computed from, or gated on, the other reviewer's finding set. The Orchestrator's aggregation step is a pure union of the two independently-returned finding lists; it performs no rule logic of its own (Requirement 4.3, 4.8).
 
 ### Human Approval Gate
 
-- **Where it pauses**: immediately after the Orchestrator aggregates one or more findings from the parallel review of Baseline vs. Candidate. The workflow stops *before* the Remediator is invoked and *before* `terraform/main.tf` is touched (Requirement 8.3, 4.4).
+- **Where it pauses**: immediately after the Orchestrator aggregates one or more findings from the parallel review of Baseline vs. Candidate. The workflow stops *before* the Remediator is invoked and *before* `terraform/main.tf` is touched (Requirement 8.4, 4.4).
 - **`CHANGE_BLOCKED` payload** presented to the Human Approver — one record per finding:
 
   | Field | Description |
   |---|---|
   | `rule_id` | `SEC-001` \| `SEC-002` \| `REL-001` \| `BR-001` |
-  | `severity` | Fixed per rule: SEC-001/SEC-002/BR-001 = `CRITICAL`, REL-001 = `HIGH` (design-time severity mapping; not otherwise specified by requirements) |
+  | `severity` | Fixed per rule per Requirement 8.3: SEC-001 = `CRITICAL`, SEC-002 = `CRITICAL`, REL-001 = `HIGH`, BR-001 = `CRITICAL` |
   | `resource` | Terraform resource address, e.g. `aws_security_group.payments_sg` |
   | `baseline_value` | Value read from `artifacts/baseline-plan.json` at the JSON path for that rule |
   | `candidate_value` | Value read from `artifacts/candidate-plan.json` at the same path |
@@ -246,8 +246,8 @@ Because there is no data dependency between the two calls, the Orchestrator issu
   | `proposed_remediation` | The restore action, e.g. "Restore `cidr_blocks` on the port-22 ingress rule of `aws_security_group.payments_sg` to `baseline_value`" |
 
 - **Capturing the decision**: the Human Approver responds with an explicit approve or reject signal for the presented `CHANGE_BLOCKED` payload (the concrete UI/CLI mechanism for capturing this signal is an implementation detail for the tasks phase; the design constraint is that it must be an explicit, out-of-band human action, not an inferred or default agent decision).
-- **Approved path**: Orchestrator invokes the Remediator with the approved finding(s); Remediator invokes `apply_remediation.py`; a fresh Remediated Plan is generated and re-reviewed; Orchestrator reports `SAFE_TO_SHIP` only if that re-review is clean (Requirement 8, 10).
-- **Rejected path**: Orchestrator reports `REMEDIATION_REJECTED`, leaves `terraform/main.tf` unmodified, and never invokes the Remediator (Requirement 8.4, 8.5). The workflow stops there — there is no retry loop implied by this design.
+- **Approved path**: Orchestrator invokes the Remediator with the approved finding(s); Remediator invokes `apply_remediation.py`; a fresh Remediated Plan is generated and re-reviewed; Orchestrator reports `SAFE_TO_SHIP` only if the Terraform plan execution for the Remediated Plan succeeded AND both the Security Reviewer and the Reliability Reviewer return `PASS` on that re-review (Requirement 10.3). A `FAIL` from either reviewer, an `INCOMPLETE` from either reviewer, or any tool/evidence-generation error independently blocks `SAFE_TO_SHIP` (Requirement 10.3, 10.4, 10.5, 10.6).
+- **Rejected path**: Orchestrator reports `REMEDIATION_REJECTED`, leaves `terraform/main.tf` unmodified, and never invokes the Remediator (Requirement 8.5, 8.6). The workflow stops there — there is no retry loop implied by this design.
 
 ### Terraform Plan Tool — `scripts/run_tf_plan.py`
 
@@ -309,7 +309,7 @@ Each reviewer returns a list of zero or more records of this shape (this is also
 ```text
 Finding {
   rule_id: "SEC-001" | "SEC-002" | "REL-001" | "BR-001"
-  severity: "CRITICAL" | "HIGH"
+  severity: "CRITICAL" | "HIGH"   # per Requirement 8.3: SEC-001/SEC-002/BR-001 = CRITICAL, REL-001 = HIGH
   resource: str            # Terraform resource address
   baseline_value: <str | int | bool>
   candidate_value: <str | int | bool>   # or remediated_value, on the post-remediation cycle
@@ -324,12 +324,12 @@ Finding {
 
 ```text
 ReviewResult {
-  status: "PASS" | "FINDINGS" | "INCOMPLETE"
+  status: "PASS" | "FAIL" | "INCOMPLETE"
   findings: list[Finding]     # empty when status is PASS or INCOMPLETE
 }
 ```
 
-`INCOMPLETE` is the status the Reliability Reviewer returns for a rule whose evaluation did not finish (Requirement 6.7) — it is distinct from `PASS` so the Orchestrator never treats a failed evaluation as evidence of safety.
+Both the Security Reviewer and the Reliability Reviewer return this same three-way `ReviewResult`: `PASS` when evaluation completes and no supported finding was identified (Requirements 5.7, 6.7), `FAIL` when evaluation completes and a supported finding was identified (Requirements 5.8, 6.8), or `INCOMPLETE` when the reviewer could not complete the required evaluation of one of its two rules (Requirements 5.9, 6.9). `INCOMPLETE` is distinct from `PASS` so the Orchestrator never treats a failed evaluation as evidence of safety.
 
 ### Remediation invocation record (internal — Remediator → Remediation Script, via CLI args)
 
@@ -367,7 +367,7 @@ Verified by: `test_security_reviewer.py` (asserts every returned finding's `rule
 
 For all executions of the ChangeGuard workflow, `terraform/main.tf` is modified only after an explicit human approval signal has been recorded for the finding(s) being remediated; the rejected path and the no-finding path leave `terraform/main.tf` unmodified.
 
-**Validates: Requirements 8.3, 8.4, 8.5, 9.6**
+**Validates: Requirements 8.4, 8.5, 8.6, 9.6**
 
 Verified by: `test_remediation_script.py`, which exercises `apply_remediation.py` only along the approved-remediation call path (the script is the sole code path capable of writing `terraform/main.tf`, and the test suite contains no call to it outside that path); the rejected/no-finding branches are confirmed by inspection of the Orchestrator's control flow, which contains no invocation of the Remediator prior to approval.
 
@@ -381,11 +381,11 @@ Verified by: `test_remediation_script.py`, which asserts a successful, narrowly-
 
 ### Property 5: SAFE_TO_SHIP requires successful execution and dual PASS on the same evidence pair
 
-For all final verdicts of `SAFE_TO_SHIP`, the relevant Terraform plan execution succeeded and both the Security Reviewer and the Reliability Reviewer returned `PASS` when evaluated against that same Baseline/Candidate-or-Remediated evidence pair.
+For all final verdicts of `SAFE_TO_SHIP`, the relevant Terraform plan execution succeeded and both the Security Reviewer and the Reliability Reviewer returned `PASS` when evaluated against that same Baseline/Candidate-or-Remediated evidence pair; a `FAIL` from either reviewer, an `INCOMPLETE` from either reviewer, or a Terraform plan execution / tool error each independently and unconditionally block `SAFE_TO_SHIP`.
 
-**Validates: Requirements 10.3**
+**Validates: Requirements 10.3, 10.4, 10.5, 10.6**
 
-Verified by: `test_baseline_pass.py` (safe baseline vs. `candidate_safe.json` — both reviewers PASS) and `test_remediated_plan.py` (Baseline vs. real, successfully-generated Remediated Plan — both reviewers PASS); the reviewer-level fixture tests in `test_security_reviewer.py`/`test_reliability_reviewer.py` confirm that any transition-fixture pair yields a finding rather than PASS, so `SAFE_TO_SHIP` is never reachable from an evidence pair with an outstanding finding.
+Verified by: `test_baseline_pass.py` (safe baseline vs. `candidate_safe.json` — both reviewers PASS) and `test_remediated_plan.py` (Baseline vs. real, successfully-generated Remediated Plan — both reviewers PASS); the reviewer-level fixture tests in `test_security_reviewer.py`/`test_reliability_reviewer.py` confirm that any transition-fixture pair yields `FAIL` with a finding rather than `PASS`, so `SAFE_TO_SHIP` is never reachable from an evidence pair with an outstanding finding, an `INCOMPLETE` result, or a failed Terraform execution.
 
 ## Kiro Hook / Safety Strategy
 
@@ -429,7 +429,8 @@ Together, the Kiro hook (workspace-wide, pattern-based) and the in-script allow-
 - **Terraform command failures** (any of `init`/`fmt -check`/`validate`/`plan`/`show` exiting non-zero): the Terraform Plan Tool aborts immediately, writes nothing to the target artifact path (no partial/corrupt JSON), and returns a non-zero exit status plus the captured stderr. The Orchestrator treats this as a workflow-level failure distinct from both verdicts — it does not proceed to invoke either reviewer, since Requirement 3 requires two genuine plans and only one (or zero) exist at that point.
 - **Malformed or missing plan JSON**: before evaluating any rule, each reviewer confirms the target file parses as JSON and that the specific resource address and field path for that rule are present with the expected type. Any failure here is treated identically to "insufficient evidence" (see next point), not as a crash that produces a false PASS.
 - **Insufficient evidence must not fabricate findings** (Requirement 3): every rule-check function's default outcome is *no finding*. A finding is only emitted when the function can positively read both the expected baseline condition and the expected candidate/remediated transition value from parsed JSON. Missing fields, missing resource addresses, unexpected types, or an ingress array with no entry covering the relevant port all fall through to "no finding" rather than an assumed violation.
-- **Reliability Reviewer incomplete evaluation** (Requirement 6.7): if evaluating REL-001 or BR-001 raises an exception, times out, or otherwise fails to complete, the Reliability Reviewer does not report a finding — or a PASS — for that specific rule. It returns a third status (distinct from finding/PASS) for the incomplete rule, and the Orchestrator treats "incomplete" as blocking a `SAFE_TO_SHIP` verdict for that comparison cycle (an incomplete evaluation is not evidence of safety, so it cannot be silently treated as PASS).
+- **Reviewer incomplete evaluation** (Requirements 5.9, 6.9): if evaluating any of its supported rules (SEC-001/SEC-002 for the Security Reviewer, REL-001/BR-001 for the Reliability Reviewer) raises an exception, times out, or otherwise fails to complete, that reviewer does not report a finding — or a `PASS` — for the rule that didn't finish. It returns `INCOMPLETE` as its `ReviewResult.status` for that comparison cycle, and the Orchestrator treats `INCOMPLETE` as blocking a `SAFE_TO_SHIP` verdict for that comparison cycle, independent of and in addition to a `FAIL` result (Requirement 10.5) — an incomplete evaluation is not evidence of safety, so it cannot be silently treated as PASS.
+- **SAFE_TO_SHIP is blocked independently by FAIL, INCOMPLETE, or execution/tool error** (Requirements 10.3–10.6): the Orchestrator reports `SAFE_TO_SHIP` only when the relevant Terraform plan execution succeeded and both the Security Reviewer and the Reliability Reviewer returned `PASS`. A `FAIL` from either reviewer, an `INCOMPLETE` from either reviewer, and a Terraform plan generation failure or any tool-reported error are each, on their own, sufficient to block `SAFE_TO_SHIP` — the Orchestrator does not require more than one of these conditions to withhold the verdict, and none of them can be overridden by a PASS from the other reviewer.
 - **Unsupported rule IDs during remediation** (Requirement 9.7): this should be unreachable given the reviewers' fixed scope, but is defended in two places anyway. The Remediator refuses to act on any finding whose `rule_id` is not one of the four supported IDs (blocks that finding's remediation, does not invoke the script). Independently, `apply_remediation.py` re-validates `--rule-id` against its own whitelist and exits non-zero with no file write if it ever receives anything else — the same defense-in-depth pattern used for the Safety Hook's secondary layer.
 
 ## Testing Strategy
@@ -476,6 +477,6 @@ Tied to Requirement 13. Approximate timings for a judge following the flow end t
 5. **(1:30–2:30) Observe specialist findings**: the judge sees the `CHANGE_BLOCKED` payload with rule ID, severity, resource, baseline value, candidate value, reason, and proposed remediation.
 6. **(2:30–3:00) Approve remediation**: the judge gives explicit approval.
 7. **(3:00–4:00) Observe remediation**: the Remediator delegates to `apply_remediation.py`, which corrects `terraform/main.tf`; the Orchestrator generates `artifacts/remediated-plan.json` and re-invokes both reviewers against Baseline vs. Remediated.
-8. **(4:00–4:30) Observe the final verdict**: `SAFE_TO_SHIP`, explicitly scoped to "passed the four supported ChangeGuard MVP rules" and not a claim of universal production-readiness (Requirement 10.5).
+8. **(4:00–4:30) Observe the final verdict**: `SAFE_TO_SHIP`, explicitly scoped to "passed the four supported ChangeGuard MVP rules" and not a claim of universal production-readiness (Requirement 10.8).
 
 Total: approximately five minutes (Requirement 13.2). A judge who instead rejects at step 6 sees `REMEDIATION_REJECTED` with `terraform/main.tf` left unmodified and the Remediator never invoked, demonstrating the other branch of the Human Approval Gate.
