@@ -1,0 +1,42 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_security_group.payments_sg",
+      "change": {
+        "after": {
+          "ingress": [
+            {
+              "protocol": "tcp",
+              "from_port": 22,
+              "to_port": 22,
+              "cidr_blocks": "10.0.0.0/8"
+            },
+            {
+              "protocol": "tcp",
+              "from_port": 5432,
+              "to_port": 5432,
+              "cidr_blocks": ["10.0.0.0/8"]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "address": "aws_ecs_service.payments_api",
+      "change": {
+        "after": {
+          "desired_count": 3
+        }
+      }
+    },
+    {
+      "address": "aws_db_instance.payments_db",
+      "change": {
+        "after": {
+          "deletion_protection": true
+        }
+      }
+    }
+  ]
+}

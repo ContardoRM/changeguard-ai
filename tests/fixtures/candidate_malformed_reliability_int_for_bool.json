@@ -1,0 +1,21 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_ecs_service.payments_api",
+      "change": {
+        "after": {
+          "desired_count": 3
+        }
+      }
+    },
+    {
+      "address": "aws_db_instance.payments_db",
+      "change": {
+        "after": {
+          "deletion_protection": 1
+        }
+      }
+    }
+  ]
+}

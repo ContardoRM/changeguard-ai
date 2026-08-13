@@ -50,12 +50,12 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
 - [ ] 3. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 4. Implement the Security Reviewer evidence-extraction module (`scripts/security_rules.py`) and its tests
-  - [ ] 4.1 Implement SEC-001 evidence extraction
+  - [x] 4.1 Implement SEC-001 evidence extraction
     - Read `resource_changes[]` where `.address == "aws_security_group.payments_sg"`, then `.change.after.ingress[]`, matching the entry where `from_port <= 22 <= to_port` and `protocol` is `"tcp"` or `"-1"`
     - Return a plain evidence record `{resource, baseline: {cidr_blocks: [...]}, candidate: {cidr_blocks: [...]}}` when both the Baseline Plan and the Candidate/Remediated Plan contain a matching entry
     - Return an evidence-unavailable/malformed signal — never `PASS`/`FAIL`/`INCOMPLETE`, never a `Finding` — when the resource address is missing, the field is missing/wrong-typed, or no ingress entry covers port 22, in either plan
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 5.10_
-  - [ ] 4.2 Implement SEC-002 evidence extraction
+  - [x] 4.2 Implement SEC-002 evidence extraction
     - Same resource/field path as 4.1, matching the ingress entry where `from_port <= 5432 <= to_port`
     - The baseline's port-5432 ingress entry is explicit in `terraform/main.tf`'s baseline configuration (not inferred or defaulted), so this reads it directly from the Baseline Plan's `.change.after.ingress[]`, symmetric with SEC-001's port-22 entry
     - Return an evidence record or an evidence-unavailable/malformed signal, using the same rules as 4.1, applied to port 5432
@@ -73,12 +73,12 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 5.1, 5.5, 5.6, 5.9, 5.10, 5.11, 12.3, 12.4, 12.10_
 
 - [ ] 5. Implement the Reliability Reviewer evidence-extraction module (`scripts/reliability_rules.py`) and its tests
-  - [ ] 5.1 Implement REL-001 evidence extraction
+  - [x] 5.1 Implement REL-001 evidence extraction
     - Read `resource_changes[]` where `.address == "aws_ecs_service.payments_api"`, then `.change.after.desired_count`
     - Return a plain evidence record `{resource, baseline: {desired_count: <int>}, candidate: {desired_count: <int>}}` when both plans contain the field with the expected type
     - Return an evidence-unavailable/malformed signal — never `PASS`/`FAIL`/`INCOMPLETE`, never a `Finding` — when the resource address or field is missing or wrong-typed in either plan
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 6.10_
-  - [ ] 5.2 Implement BR-001 evidence extraction
+  - [x] 5.2 Implement BR-001 evidence extraction
     - Read `resource_changes[]` where `.address == "aws_db_instance.payments_db"`, then `.change.after.deletion_protection`
     - Return a plain evidence record `{resource, baseline: {deletion_protection: <bool>}, candidate: {deletion_protection: <bool>}}` when both plans contain the field with the expected type
     - Return an evidence-unavailable/malformed signal — never `PASS`/`FAIL`/`INCOMPLETE`, never a `Finding` — when the resource address or field is missing or wrong-typed in either plan
@@ -95,23 +95,24 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - This test module depends on both the evidence-extraction functions (Task 5.1, 5.2) and the Reliability Reviewer's judgment logic (Task 8.2) — see the Task Dependency Graph
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 6.1, 6.5, 6.6, 6.9, 6.10, 6.11, 12.5, 12.6, 12.10_
 
-- [ ] 6. Create rule-evaluation test fixtures (`tests/fixtures/*.json`)
-  - [ ] 6.1 Create `tests/fixtures/baseline_plan.json` and `tests/fixtures/candidate_safe.json`
+- [x] 6. Create rule-evaluation test fixtures (`tests/fixtures/*.json`)
+  - [x] 6.1 Create `tests/fixtures/baseline_plan.json` and `tests/fixtures/candidate_safe.json`
     - `baseline_plan.json`: an explicit port-22 ingress entry with `cidr_blocks = ["10.0.0.0/8"]` AND an explicit port-5432 ingress entry with `cidr_blocks = ["10.0.0.0/8"]` (both explicit, symmetric — matching design.md's Data Models example), `desired_count = 3`, `deletion_protection = true`, matching the `resource_changes[]` schema in design.md's Data Models section
     - `candidate_safe.json`: identical safe values (no supported transition), used for the PASS scenario in both reviewers and in `test_baseline_pass.py`
     - _Requirements: 12.2, 12.4_
-  - [ ] 6.2 Create `tests/fixtures/candidate_sec001.json` and `tests/fixtures/candidate_sec002.json`
+  - [x] 6.2 Create `tests/fixtures/candidate_sec001.json` and `tests/fixtures/candidate_sec002.json`
     - `candidate_sec001.json`: port-22 ingress `cidr_blocks` changed to `["0.0.0.0/0"]`, all other fields safe
     - `candidate_sec002.json`: the existing baseline port-5432 ingress entry's `cidr_blocks` changed to `["0.0.0.0/0"]` (a baseline-relative CIDR change on the existing explicit entry, not a newly introduced ingress block — symmetric with SEC-001), all other fields safe
     - _Requirements: 12.3, 12.4_
-  - [ ] 6.3 Create `tests/fixtures/candidate_rel001.json` and `tests/fixtures/candidate_br001.json`
+  - [x] 6.3 Create `tests/fixtures/candidate_rel001.json` and `tests/fixtures/candidate_br001.json`
     - `candidate_rel001.json`: `desired_count` changed to `1`, all other fields safe
     - `candidate_br001.json`: `deletion_protection` changed to `false`, all other fields safe
     - _Requirements: 12.5, 12.6_
-  - [ ] 6.4 Create malformed/missing-field fixtures to support the `INCOMPLETE` test case
+  - [x] 6.4 Create malformed/missing-field fixtures to support the `INCOMPLETE` test case
     - Create fixture(s) (e.g. `tests/fixtures/candidate_malformed_security.json` and `tests/fixtures/candidate_malformed_reliability.json`) that omit the relevant resource address, or use a wrong-typed/missing field, for at least one rule owned by each reviewer
     - These fixtures directly support the `INCOMPLETE` assertions in Tasks 4.3 and 5.3 (evidence-unavailable/malformed signal from extraction, `INCOMPLETE` from reviewer judgment)
     - _Requirements: 5.6, 5.9, 6.6, 6.9, 12.10_
+    - Note: implemented at the evidence-extraction layer only, per the phase's architectural boundary — extraction returns a structural `EvidenceStatus` (`MISSING_RESOURCE` / `MISSING_FIELD` / `MALFORMED`), never `INCOMPLETE` itself. Additional fixture variants (`candidate_missing_resource_{security,reliability}.json`, `candidate_missing_field_{security,reliability}.json`, `candidate_malformed_reliability_int_for_bool.json`, `invalid_json.json`) were added beyond the two named here to cover each distinct evidence-status outcome independently.
 
 - [ ] 7. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
