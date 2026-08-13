@@ -10,18 +10,18 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
 
 ## Tasks
 
-- [ ] 1. Implement the Terraform Plan Tool (`scripts/run_tf_plan.py`)
-  - [ ] 1.1 Implement CLI argument parsing (`--terraform-dir`, `--output`) and the fixed subcommand allow-list guard
+- [x] 1. Implement the Terraform Plan Tool (`scripts/run_tf_plan.py`)
+  - [x] 1.1 Implement CLI argument parsing (`--terraform-dir`, `--output`) and the fixed subcommand allow-list guard
     - Parse `--terraform-dir` and `--output` from argv (no shell string construction; argv lists only, per design.md's Terraform Plan Tool contract)
     - Define the fixed allow-list `{init, fmt, validate, plan, show}` and check every subcommand against it before any `subprocess.run` call, so no code path can reach `apply`/`destroy`/`aws` — this is the Requirement 11.6 secondary enforcement layer for this script
     - _Requirements: 2.3, 2.4, 11.6_
-  - [ ] 1.2 Implement the init/fmt-check/validate/plan/show pipeline with fail-fast error handling
+  - [x] 1.2 Implement the init/fmt-check/validate/plan/show pipeline with fail-fast error handling
     - Run, in order, `terraform init -input=false`, `terraform fmt -check`, `terraform validate`, `terraform plan -refresh=false -out=<tmpfile>`, `terraform show -json <tmpfile>` against `--terraform-dir`
     - Write the final command's stdout byte-for-byte to `--output`, overwriting any existing file at that path (Artifact Lifecycle overwrite semantics)
     - On any non-zero exit from a subcommand, abort immediately, write nothing to `--output` (no partial/corrupt JSON), and return a non-zero exit status with captured stderr
     - Contain no risk-detection or rule-evaluation logic of any kind
     - _Requirements: 2.1, 2.2, 2.3_
-  - [ ] 1.3 Write unit tests for `run_tf_plan.py`'s allow-list guard and error handling
+  - [x] 1.3 Write unit tests for `run_tf_plan.py`'s allow-list guard and error handling
     - Test that a stubbed/mocked subprocess call outside `{init, fmt, validate, plan, show}` is rejected before invocation
     - Test that a simulated non-zero subcommand exit results in no write to `--output` and a non-zero return code
     - Test that re-running the tool against the same `--output` path overwrites the prior file content (Artifact Lifecycle overwrite behavior)

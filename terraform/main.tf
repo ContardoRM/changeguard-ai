@@ -26,7 +26,7 @@ resource "aws_security_group" "payments_sg" {
 resource "aws_ecs_service" "payments_api" {
   name = "payments-api"
 
-  cluster = "arn:aws:ecs:us-east-1:000000000000:cluster/changeguard-demo"
+  cluster         = "arn:aws:ecs:us-east-1:000000000000:cluster/changeguard-demo"
   task_definition = "arn:aws:ecs:us-east-1:000000000000:task-definition/payments-api:1"
 
   desired_count       = 3
@@ -47,5 +47,5 @@ resource "aws_db_instance" "payments_db" {
   password = "changeguard-demo-password"
 
   deletion_protection = true
-  skip_final_snapshot  = true
+  skip_final_snapshot = true
 }
