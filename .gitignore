@@ -1,0 +1,10 @@
+.terraform/
+.terraform.lock.hcl
+*.tfplan
+*.tfstate
+*.tfstate.*
+artifacts/*.json
+!artifacts/.gitkeep
+__pycache__/
+*.pyc
+.DS_Store
