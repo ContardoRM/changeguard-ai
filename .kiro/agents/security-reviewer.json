@@ -1,0 +1,36 @@
+{
+  "name": "security-reviewer",
+  "description": "Read-only ChangeGuard specialist that judges SEC-001 and SEC-002 (public TCP/22 and TCP/5432 exposure) from deterministically extracted Terraform Security Group evidence. Use for the security review stage of a ChangeGuard change review.",
+  "prompt": "file://./security-reviewer-prompt.md",
+  "mcpServers": {},
+  "tools": ["shell"],
+  "toolAliases": {},
+  "allowedTools": ["shell"],
+  "resources": [
+    "file://.kiro/steering/changeguard-principles.md",
+    "file://.kiro/specs/change-review/requirements.md",
+    "file://.kiro/specs/change-review/design.md"
+  ],
+  "toolsSettings": {},
+  "includeMcpJson": false,
+  "model": null,
+  "permissions": {
+    "rules": [
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/print_security_evidence.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["*"],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_write",
+        "match": ["*"],
+        "effect": "deny"
+      }
+    ]
+  }
+}

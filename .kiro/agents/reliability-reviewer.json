@@ -1,0 +1,36 @@
+{
+  "name": "reliability-reviewer",
+  "description": "Read-only ChangeGuard specialist that judges REL-001 (ECS desired_count reduced to 1) and BR-001 (RDS deletion_protection disabled) from deterministically extracted Terraform evidence. Use for the reliability/blast-radius review stage of a ChangeGuard change review.",
+  "prompt": "file://./reliability-reviewer-prompt.md",
+  "mcpServers": {},
+  "tools": ["shell"],
+  "toolAliases": {},
+  "allowedTools": ["shell"],
+  "resources": [
+    "file://.kiro/steering/changeguard-principles.md",
+    "file://.kiro/specs/change-review/requirements.md",
+    "file://.kiro/specs/change-review/design.md"
+  ],
+  "toolsSettings": {},
+  "includeMcpJson": false,
+  "model": null,
+  "permissions": {
+    "rules": [
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/print_reliability_evidence.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["*"],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_write",
+        "match": ["*"],
+        "effect": "deny"
+      }
+    ]
+  }
+}
