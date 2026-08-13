@@ -1,0 +1,36 @@
+{
+  "name": "remediator",
+  "description": "Restricted ChangeGuard agent that translates an already-approved Finding (SEC-001, SEC-002, REL-001, or BR-001) into exactly one call to the deterministic scripts/apply_remediation.py script. Does not implement or enforce human approval; assumes approval has already occurred upstream.",
+  "prompt": "file://./remediator-prompt.md",
+  "mcpServers": {},
+  "tools": ["shell"],
+  "toolAliases": {},
+  "allowedTools": ["shell"],
+  "resources": [
+    "file://.kiro/steering/changeguard-principles.md",
+    "file://.kiro/specs/change-review/requirements.md",
+    "file://.kiro/specs/change-review/design.md"
+  ],
+  "toolsSettings": {},
+  "includeMcpJson": false,
+  "model": null,
+  "permissions": {
+    "rules": [
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/apply_remediation.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["*"],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_write",
+        "match": ["*"],
+        "effect": "deny"
+      }
+    ]
+  }
+}

@@ -27,25 +27,26 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - Test that re-running the tool against the same `--output` path overwrites the prior file content (Artifact Lifecycle overwrite behavior)
     - _Requirements: 2.3, 2.4, 11.6_
 
-- [ ] 2. Implement the Remediation Script (`scripts/apply_remediation.py`)
-  - [ ] 2.1 Implement CLI argument parsing (`--terraform-dir`, `--rule-id`, `--resource`, `--restore-value`) and the 4-entry rule whitelist
+- [x] 2. Implement the Remediation Script (`scripts/apply_remediation.py`)
+  - [x] 2.1 Implement CLI argument parsing (`--terraform-dir`, `--rule-id`, `--resource`, `--restore-value`) and the 4-entry rule whitelist
     - Parse the four flags from argv (no shell string construction, no additional file-path or free-form content argument)
     - Define the fixed whitelist mapping `rule_id -> (expected resource type/address, expected HCL attribute/block, value type)` for exactly `SEC-001`, `SEC-002`, `REL-001`, `BR-001`
     - If `--rule-id` is not one of the four, or `--resource` does not match the expected resource type/address for that rule, exit non-zero and write nothing
     - _Requirements: 9.2, 9.3, 9.5, 9.7_
-  - [ ] 2.2 Implement the four narrow, rule-specific HCL edits with per-rule type validation
+  - [x] 2.2 Implement the four narrow, rule-specific HCL edits with per-rule type validation
     - SEC-001: rewrite `cidr_blocks` on the port-22 ingress block of `aws_security_group.payments_sg`, validating `--restore-value` is a CIDR-list string
     - SEC-002: restore `cidr_blocks` on the existing baseline port-5432 ingress entry of the matched security group resource to the exact baseline value, symmetric with SEC-001's port-22 restore — never inventing a new value or a new ingress block — validating `--restore-value` is a CIDR-list string
     - REL-001: rewrite `desired_count` on `aws_ecs_service.payments_api`, validating `--restore-value` is an int
     - BR-001: rewrite `deletion_protection` on `aws_db_instance.payments_db`, validating `--restore-value` is a bool
     - Perform only the one targeted edit for the matched rule and nothing else in `terraform/main.tf`
     - _Requirements: 9.3, 9.5_
-  - [ ] 2.3 Write unit tests for whitelist rejection and each of the four narrow edits
+  - [x] 2.3 Write unit tests for whitelist rejection and each of the four narrow edits
     - Test a non-zero exit and no file modification for an unsupported `--rule-id`
     - Test a non-zero exit and no file modification when `--resource` does not match the rule's expected type/address
     - Test each of the four supported rule IDs against a temporary copy of `terraform/main.tf`, asserting only the targeted attribute changed and the rest of the file is untouched (including that SEC-002's restore targets the existing port-5432 entry, not a newly created one)
     - Test that an incorrectly-typed `--restore-value` is rejected before any write
     - _Requirements: 9.3, 9.5, 9.7, 12.7_
+    - Implemented in `scripts/apply_remediation.py` (deterministic stdlib brace-counting/regex parsing scoped to the fixed demo Terraform structure — no external HCL parser, no unrestricted global search-and-replace) and `tests/test_apply_remediation.py` (27 tests, all operating on temporary copies of `terraform/main.tf`, never the repository baseline). Covers all four mandatory positive scenarios (SEC-001, SEC-002, REL-001, BR-001, each asserting the unrelated attribute/ingress block and unrelated file content are byte-for-byte unchanged) and all seven mandatory negative scenarios (unsupported rule ID, wrong resource for a supported rule, malformed restore value, missing target resource, missing target attribute/ingress block, already-remediated no-op target, and ambiguous/duplicate targets) — every negative case asserts `main.tf` content is identical before and after the rejected call. Writes are atomic (temp file + `os.replace`) so no partially written `main.tf` can ever be observed.
 
 - [ ] 3. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
@@ -136,13 +137,14 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
   > Note: `scripts/security_rules.py` and `scripts/reliability_rules.py` themselves were NOT modified in this phase and still contain zero policy-decision logic (no rule IDs, no PASS/FAIL/INCOMPLETE, no thresholds) — verified by grep. Two new thin serialization CLIs, `scripts/print_security_evidence.py` and `scripts/print_reliability_evidence.py`, were added solely so each agent's `shell` tool has a single, narrowly-permitted, non-interactive command to invoke; both serializers only call the existing extraction functions and print their result as JSON, with no comparison/threshold/verdict logic of their own.
 
 - [ ] 9. Define the Remediator Kiro Crew agent (`.kiro/agents/`)
-  - [ ] 9.1 Author the Remediator agent definition
+  - [x] 9.1 Author the Remediator agent definition
     - Trigger boundary: only invocable by the Orchestrator, and only after an explicit human approval signal — no code path in the agent definition invokes `apply_remediation.py` on its own initiative
     - Input boundary: accepts only the approved `Finding` record(s) (never raw plan JSON, never `terraform/main.tf` directly)
     - Behavior: for each approved finding, invokes `python3 scripts/apply_remediation.py --terraform-dir <path> --rule-id <finding.rule_id> --resource <finding.resource> --restore-value <finding.baseline_value>` — the restore value is always the finding's recorded `baseline_value`, never invented
     - Refusal boundary: blocks (does not invoke the script for) any finding whose `rule_id` is outside `{SEC-001, SEC-002, REL-001, BR-001}`
     - Never opens or edits `terraform/main.tf` itself
     - _Requirements: 9.1, 9.2, 9.4, 9.6, 9.7_
+    - Implemented as `.kiro/agents/remediator.json` with its policy-free operational prompt in `.kiro/agents/remediator-prompt.md`. Permissions restrict `shell` to exactly `python3 scripts/apply_remediation.py *` (wildcard shell deny beneath it) and deny `fs_write` entirely — the agent holds no generic write tool at all; the only file mutation capability in this phase lives inside the deterministic script. The prompt explicitly states the agent assumes its caller (the future Orchestrator) has already obtained human approval — it implements no approval mechanism of its own (no `input()`, no env var check, no approval file), consistent with this phase's scope boundary. Verified live via `kiro-cli chat --agent remediator --no-interactive` against a temporary Terraform working copy (never the repository baseline): a REL-001 Finding correctly derived `--restore-value 3` from `finding.baseline_value` (not `candidate_value`) and successfully remediated; an unsupported rule ID (`IAM-001`) was refused before any shell invocation occurred; a Finding with a `resource` mismatched to its `rule_id` was passed through to the script, which rejected it, and the agent relayed that `remediation_failed` result honestly rather than retrying or guessing.
 
 - [ ] 10. Implement the Safety Hook (`.kiro/hooks/`)
   - [ ] 10.1 Author the `preToolUse` safety hook blocking destructive commands workspace-wide
