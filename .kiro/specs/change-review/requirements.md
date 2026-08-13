@@ -28,8 +28,9 @@ The end-to-end evidence and approval flow is:
 
 - **ChangeGuard System**: The overall Kiro Crew workflow that generates Terraform plan evidence, coordinates specialist review, manages human approval, and produces a final verdict.
 - **Orchestrator**: The Kiro Crew agent that coordinates the ChangeGuard workflow — requesting evidence, invoking reviewer agents, aggregating results, requesting human approval, delegating approved remediation, triggering post-remediation verification, and producing the final verdict. The Orchestrator does not itself evaluate SEC-001, SEC-002, REL-001, or BR-001.
-- **Security Reviewer**: The read-only agent that evaluates only SEC-001 and SEC-002 findings by comparing Terraform plan evidence.
-- **Reliability Reviewer**: The read-only agent that evaluates only REL-001 and BR-001 findings by comparing Terraform plan evidence.
+- **Security Reviewer**: The read-only, LLM-driven Kiro Crew agent that determines whether deterministically extracted evidence (see Evidence Extraction) satisfies SEC-001 or SEC-002 and that produces the resulting `ReviewResult`. The Security Reviewer is the only component authorized to decide `PASS`, `FAIL`, or `INCOMPLETE`, or to produce a finding, for SEC-001 or SEC-002; deterministic code never makes this decision.
+- **Reliability Reviewer**: The read-only, LLM-driven Kiro Crew agent that determines whether deterministically extracted evidence (see Evidence Extraction) satisfies REL-001 or BR-001 and that produces the resulting `ReviewResult`. The Reliability Reviewer is the only component authorized to decide `PASS`, `FAIL`, or `INCOMPLETE`, or to produce a finding, for REL-001 or BR-001; deterministic code never makes this decision.
+- **Evidence Extraction**: The deterministic step of reading the two relevant plan JSON artifacts and producing a structured record of facts for the resource and field a rule concerns (for example: resource address, baseline value, candidate value). Evidence Extraction SHALL NOT itself return `PASS`, `FAIL`, `INCOMPLETE`, a finding, a rule decision, a severity, or a remediation decision — it only extracts and validates facts for the Security Reviewer or Reliability Reviewer to evaluate.
 - **Remediator**: The agent that, only after explicit human approval, determines which supported rule ID requires correction and invokes the Remediation Script to apply that correction.
 - **Terraform Plan Tool**: The deterministic local tool that runs real Terraform commands (`terraform plan -refresh=false`, `terraform show -json`) to produce plan JSON evidence. It contains no risk-detection logic.
 - **Remediation Script**: The deterministic local Python script that applies one approved, narrowly scoped correction to `terraform/main.tf` for a supported rule ID. It exposes no generic arbitrary file-writing capability.
@@ -40,7 +41,7 @@ The end-to-end evidence and approval flow is:
 - **Finding**: A supported rule violation (SEC-001, SEC-002, REL-001, or BR-001) identified by comparing exactly two plan JSON files.
 - **Human Approver**: The person who reviews a `CHANGE_BLOCKED` result and explicitly approves or rejects the proposed remediation.
 - **Test Suite**: The automated test code, written using only the Python 3 standard library, that verifies each supported rule and the remediation path.
-- **Reviewer Result**: The outcome a reviewer (Security Reviewer or Reliability Reviewer) returns for a comparison cycle: `PASS` (evaluation completed and no supported finding was identified), `FAIL` (evaluation completed and a supported finding was identified), or `INCOMPLETE` (the reviewer could not complete the required evaluation).
+- **Reviewer Result**: The outcome a reviewer (Security Reviewer or Reliability Reviewer) returns for a comparison cycle: `PASS` (valid required evidence was evaluated and the rule was not triggered), `FAIL` (valid required evidence was evaluated and the rule was triggered, producing a finding), or `INCOMPLETE` (the required resource or field was missing, malformed, or otherwise not usable, or the reviewer could not otherwise complete the required evaluation). Missing or malformed required evidence SHALL NOT be treated as `PASS`.
 
 ## Out of Scope
 
@@ -86,7 +87,7 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 
 1. THE ChangeGuard System SHALL derive baseline values only from `artifacts/baseline-plan.json`.
 2. THE ChangeGuard System SHALL derive candidate values only from `artifacts/candidate-plan.json`, and remediated values only from `artifacts/remediated-plan.json`.
-3. IF a finding is not supported by comparing exactly two genuine Terraform plan JSON files, THEN THE ChangeGuard System SHALL NOT report that finding.
+3. IF a finding is not supported by comparing exactly two genuine Terraform plan JSON files, THEN THE ChangeGuard System SHALL NOT report that finding. This does not authorize reporting `PASS` in place of the unsupported finding; missing or malformed required evidence SHALL instead be reported as `INCOMPLETE` per Requirements 5.6, 5.9, 6.6, and 6.9.
 4. THE ChangeGuard System SHALL NOT treat Terraform source code alone as sufficient evidence for a finding.
 
 ### Requirement 4: Orchestrator Workflow Coordination
@@ -115,10 +116,12 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 3. THE Security Reviewer SHALL NOT modify any file.
 4. THE Security Reviewer SHALL NOT execute remediation.
 5. THE Security Reviewer SHALL NOT report AWS security recommendations outside SEC-001 and SEC-002.
-6. IF evidence is insufficient to prove a SEC-001 or SEC-002 transition, THEN THE Security Reviewer SHALL NOT report a finding.
-7. WHEN the Security Reviewer completes evaluation of SEC-001 and SEC-002 and identifies no supported finding, THE Security Reviewer SHALL return `PASS`.
-8. WHEN the Security Reviewer completes evaluation of SEC-001 or SEC-002 and identifies a supported finding, THE Security Reviewer SHALL return `FAIL`.
-9. IF the Security Reviewer fails to complete required evaluation of SEC-001 or SEC-002, THEN THE Security Reviewer SHALL return `INCOMPLETE` and SHALL NOT report any finding for the incomplete evaluation.
+6. IF the resource or field required to evaluate SEC-001 or SEC-002 is missing, malformed, or not the expected type in the Baseline Plan or in the Candidate Plan or Remediated Plan, THEN THE Security Reviewer SHALL return `INCOMPLETE` for that rule and SHALL NOT report a finding or a `PASS` for that rule.
+7. WHEN the Security Reviewer completes evaluation of SEC-001 and SEC-002 using valid required evidence and identifies no supported finding, THE Security Reviewer SHALL return `PASS`.
+8. WHEN the Security Reviewer completes evaluation of SEC-001 or SEC-002 using valid required evidence and identifies a supported finding, THE Security Reviewer SHALL return `FAIL`.
+9. IF the Security Reviewer fails to complete required evaluation of SEC-001 or SEC-002 for any reason, including a JSON parsing or evaluation failure, THEN THE Security Reviewer SHALL return `INCOMPLETE` and SHALL NOT report any finding or `PASS` for the incomplete evaluation.
+10. Deterministic code invoked by the Security Reviewer SHALL only extract and validate evidence from the Baseline Plan, the Candidate Plan, and the Remediated Plan (for example, a structured record of resource address, baseline value, and candidate value for the relevant field), and SHALL NOT return `PASS`, `FAIL`, `INCOMPLETE`, a finding, a rule decision, a severity, or a remediation decision.
+11. THE Security Reviewer, and not any deterministic code it invokes, SHALL determine whether extracted evidence satisfies SEC-001 or SEC-002 and SHALL produce the resulting `ReviewResult`.
 
 ### Requirement 6: Reliability Reviewer Scope and Constraints
 
@@ -131,10 +134,12 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 3. THE Reliability Reviewer SHALL NOT modify any file.
 4. THE Reliability Reviewer SHALL NOT execute remediation.
 5. THE Reliability Reviewer SHALL NOT report reliability or availability recommendations outside REL-001 and BR-001.
-6. IF evidence is insufficient to prove a REL-001 or BR-001 transition, THEN THE Reliability Reviewer SHALL NOT report a finding.
-7. WHEN the Reliability Reviewer completes evaluation of REL-001 and BR-001 and identifies no supported finding, THE Reliability Reviewer SHALL return `PASS`.
-8. WHEN the Reliability Reviewer completes evaluation of REL-001 or BR-001 and identifies a supported finding, THE Reliability Reviewer SHALL return `FAIL`.
-9. IF the Reliability Reviewer fails to complete required evaluation of REL-001 or BR-001, THEN THE Reliability Reviewer SHALL return `INCOMPLETE` and SHALL NOT report any finding for the incomplete evaluation.
+6. IF the resource or field required to evaluate REL-001 or BR-001 is missing, malformed, or not the expected type in the Baseline Plan or in the Candidate Plan or Remediated Plan, THEN THE Reliability Reviewer SHALL return `INCOMPLETE` for that rule and SHALL NOT report a finding or a `PASS` for that rule.
+7. WHEN the Reliability Reviewer completes evaluation of REL-001 and BR-001 using valid required evidence and identifies no supported finding, THE Reliability Reviewer SHALL return `PASS`.
+8. WHEN the Reliability Reviewer completes evaluation of REL-001 or BR-001 using valid required evidence and identifies a supported finding, THE Reliability Reviewer SHALL return `FAIL`.
+9. IF the Reliability Reviewer fails to complete required evaluation of REL-001 or BR-001 for any reason, including a JSON parsing or evaluation failure, THEN THE Reliability Reviewer SHALL return `INCOMPLETE` and SHALL NOT report any finding or `PASS` for the incomplete evaluation.
+10. Deterministic code invoked by the Reliability Reviewer SHALL only extract and validate evidence from the Baseline Plan, the Candidate Plan, and the Remediated Plan (for example, a structured record of resource address, baseline value, and candidate value for the relevant field), and SHALL NOT return `PASS`, `FAIL`, `INCOMPLETE`, a finding, a rule decision, a severity, or a remediation decision.
+11. THE Reliability Reviewer, and not any deterministic code it invokes, SHALL determine whether extracted evidence satisfies REL-001 or BR-001 and SHALL produce the resulting `ReviewResult`.
 
 ### Requirement 7: Independent Parallel Review
 
@@ -210,11 +215,14 @@ The MVP supports exactly three risk categories and four rule IDs: `SEC-001`, `SE
 1. THE Test Suite SHALL use the Python 3 standard library `unittest` module.
 2. THE Test Suite SHALL verify that a safe baseline configuration produces a `PASS` result.
 3. THE Test Suite SHALL verify that a SEC-001 transition (TCP/22 from an internal CIDR to `0.0.0.0/0`) produces a `FAIL` result.
-4. THE Test Suite SHALL verify that a SEC-002 transition (TCP/5432 from an internal CIDR to `0.0.0.0/0`) produces a `FAIL` result.
+4. THE Test Suite SHALL verify that a SEC-002 transition (TCP/5432 from the baseline's explicit internal ingress CIDR `10.0.0.0/8` to `0.0.0.0/0`) produces a `FAIL` result, and that approved remediation restores that exact baseline CIDR value, symmetric with SEC-001.
 5. THE Test Suite SHALL verify that a REL-001 transition (`desired_count` from 3 to 1) produces a `FAIL` result.
 6. THE Test Suite SHALL verify that a BR-001 transition (`deletion_protection` from `true` to `false`) produces a `FAIL` result.
 7. THE Test Suite SHALL verify that approved remediation corrects the associated value in `terraform/main.tf`.
 8. THE Test Suite SHALL verify that the Remediated Plan produces a `PASS` result.
+9. THE Test Suite SHALL verify that a finding whose rule ID is not one of SEC-001, SEC-002, REL-001, or BR-001 is blocked from remediation by the Remediator and the Remediation Script.
+10. THE Test Suite SHALL treat the following as mandatory: the SEC-001 and SEC-002 Security Reviewer scenario tests, the REL-001 and BR-001 Reliability Reviewer scenario tests, the safe baseline `PASS` test, the deterministic Remediation Script tests, and the unsupported-rule-ID rejection test described in Acceptance Criterion 9.
+11. WHERE a full Kiro Crew end-to-end automation test would require runtime agent behavior that is difficult to automate reliably, THE Test Suite MAY treat that end-to-end automation test as optional; the five-minute manual judge workflow described in Requirement 13 remains the authoritative end-to-end demonstration regardless of whether that optional test exists.
 
 ### Requirement 13: Judge Evaluation Experience
 

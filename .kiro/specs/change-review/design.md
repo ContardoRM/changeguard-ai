@@ -4,12 +4,13 @@
 
 ChangeGuard AI is a Kiro Crew workflow that reviews a proposed change to `terraform/main.tf` against four deterministic rules (`SEC-001`, `SEC-002`, `REL-001`, `BR-001`) by diffing two or three genuine Terraform plan JSON artifacts. It never applies infrastructure, never calls AWS, and never lets an LLM edit HCL directly. It runs entirely on the Kiro Crew agent framework, the real Terraform CLI (with the AWS provider), the Python 3 standard library, and Git — nothing else (Requirement 1).
 
-This design is intentionally narrow. It defines exactly four Kiro Crew agents (Orchestrator, Security Reviewer, Reliability Reviewer, Remediator), exactly two deterministic local scripts (`scripts/run_tf_plan.py`, `scripts/apply_remediation.py`), and one Kiro safety hook. No additional agents, rule IDs, cloud integrations, or infrastructure are introduced. Everything listed in the requirements document's "Out of Scope" section (IAM/S3/encryption analysis, OPA/Checkov/tfsec, GitHub PR automation, MCP servers, Bedrock, Lambda, ECS/RDS deployment, LocalStack, Docker, any frontend/database/telemetry) is a non-goal and does not appear anywhere below as an implemented capability.
+This design is intentionally narrow. It defines exactly four Kiro Crew agents (Orchestrator, Security Reviewer, Reliability Reviewer, Remediator), two deterministic local CLI scripts (`scripts/run_tf_plan.py`, `scripts/apply_remediation.py`), two deterministic evidence-extraction libraries invoked in-process by the reviewer agents (`scripts/security_rules.py`, `scripts/reliability_rules.py` — facts only, never a verdict), and one Kiro safety hook. No additional agents, rule IDs, cloud integrations, or infrastructure are introduced. Everything listed in the requirements document's "Out of Scope" section (IAM/S3/encryption analysis, OPA/Checkov/tfsec, GitHub PR automation, MCP servers, Bedrock, Lambda, ECS/RDS deployment, LocalStack, Docker, any frontend/database/telemetry) is a non-goal and does not appear anywhere below as an implemented capability.
 
 Key design commitments carried through every section:
 
 - **Two-plan evidence rule** (Requirement 3, steering doc "Evidence"): a finding is only ever produced by comparing the *after* values of two independently generated `terraform show -json` outputs — never by reading `terraform/main.tf` source, and never by reading the `before`/`after` diff *inside* a single plan (explained in detail in "Baseline/Candidate/Remediated Evidence Model" below).
 - **Separation of coordination from rule logic** (Requirement 4.8): the Orchestrator never evaluates SEC-001/SEC-002/REL-001/BR-001 itself.
+- **Separation of evidence from judgment** (Requirements 5.10, 5.11, 6.10, 6.11): the deterministic evidence-extraction libraries (`scripts/security_rules.py`, `scripts/reliability_rules.py`) only extract and validate facts from plan JSON — they never return `PASS`, `FAIL`, `INCOMPLETE`, a Finding, a severity, or a remediation decision. The Security Reviewer and Reliability Reviewer agents are the sole components that judge whether extracted evidence satisfies a rule and that produce the resulting `ReviewResult`.
 - **Separation of decision from mechanism** (Requirement 9): the Remediator (an LLM-driven agent) decides *what* to fix; a deterministic, whitelisted Python script decides *how* to edit the file.
 - **Human control** (Requirement 8, steering doc "Human control"): `terraform/main.tf` is never modified without an explicit human approval step.
 - **Structural safety** (Requirement 11, steering doc "Safety"): `terraform apply`, `terraform destroy`, AWS CLI calls, and destructive filesystem operations are blocked by a Kiro hook and by a second, independent code-level guard.
@@ -31,6 +32,8 @@ flowchart TB
 
     subgraph Tools["Deterministic Local Tools (scripts/)"]
         PlanTool["Terraform Plan Tool<br/>run_tf_plan.py<br/>(no risk logic)"]
+        SecEvidence["Security Evidence Extraction<br/>security_rules.py<br/>(facts only, no verdict)"]
+        RelEvidence["Reliability Evidence Extraction<br/>reliability_rules.py<br/>(facts only, no verdict)"]
         RemediationScript["Remediation Script<br/>apply_remediation.py<br/>(decides HOW, 4-rule whitelist)"]
     end
 
@@ -50,10 +53,14 @@ flowchart TB
 
     Orchestrator -->|"2. invoke concurrently"| SecRev
     Orchestrator -->|"2. invoke concurrently"| RelRev
-    SecRev -->|reads only| Artifacts
-    RelRev -->|reads only| Artifacts
-    SecRev -->|"PASS / FAIL / INCOMPLETE"| Orchestrator
-    RelRev -->|"PASS / FAIL / INCOMPLETE"| Orchestrator
+    SecRev -->|"invokes for evidence"| SecEvidence
+    RelRev -->|"invokes for evidence"| RelEvidence
+    SecEvidence -->|reads only| Artifacts
+    RelEvidence -->|reads only| Artifacts
+    SecEvidence -->|"evidence record (facts only)"| SecRev
+    RelEvidence -->|"evidence record (facts only)"| RelRev
+    SecRev -->|"judges evidence, PASS / FAIL / INCOMPLETE"| Orchestrator
+    RelRev -->|"judges evidence, PASS / FAIL / INCOMPLETE"| Orchestrator
 
     Orchestrator -->|"3. CHANGE_BLOCKED + payload"| Approver
     Approver -->|"4. approve / reject"| Orchestrator
@@ -70,6 +77,7 @@ Kiro-specific mapping:
 
 - Orchestrator, Security Reviewer, Reliability Reviewer, and Remediator are each defined as a separate Kiro Crew custom agent under `.kiro/agents/` (created during implementation, not in this design phase).
 - `run_tf_plan.py` and `apply_remediation.py` are plain Python 3 stdlib scripts under `scripts/`, invoked by agents as tools — they contain no LLM calls and no rule logic.
+- `security_rules.py` and `reliability_rules.py` are plain Python 3 stdlib evidence-extraction libraries under `scripts/`, invoked in-process by the Security Reviewer and Reliability Reviewer agents respectively. They contain no LLM calls and never return a verdict (`PASS`/`FAIL`/`INCOMPLETE`), a Finding, a severity, or a remediation decision — only a plain evidence record or an evidence-unavailable/malformed signal. The rule-satisfaction judgment and the resulting `ReviewResult` are produced by the agent itself.
 - The Safety Hook is a Kiro hook under `.kiro/hooks/`, registered as `preToolUse` against shell-executing tool calls workspace-wide (not scoped to a single agent), matching Requirement 11's "network-wide" intent.
 - `artifacts/` and `terraform/main.tf` are the only pieces of on-disk state the workflow reads or writes.
 
@@ -100,9 +108,13 @@ sequenceDiagram
     Note over O,RR: Phase 3 - Independent parallel review
     par Security Reviewer
         O->>SR: evaluate(baseline-plan.json, candidate-plan.json)
+        SR->>SR: invoke security_rules.py to extract evidence (facts only, no verdict)
+        SR->>SR: judge whether evidence satisfies SEC-001 / SEC-002
         SR-->>O: PASS, or FAIL with SEC-001 / SEC-002 finding(s), or INCOMPLETE
     and Reliability Reviewer
         O->>RR: evaluate(baseline-plan.json, candidate-plan.json)
+        RR->>RR: invoke reliability_rules.py to extract evidence (facts only, no verdict)
+        RR->>RR: judge whether evidence satisfies REL-001 / BR-001
         RR-->>O: PASS, or FAIL with REL-001 / BR-001 finding(s), or INCOMPLETE
     end
     O->>O: aggregate (no rule evaluation performed here)
@@ -120,9 +132,11 @@ sequenceDiagram
             PT-->>O: remediated-plan.json written
             par Security re-review
                 O->>SR: evaluate(baseline-plan.json, remediated-plan.json)
+                SR->>SR: extract evidence, then judge against SEC-001 / SEC-002
                 SR-->>O: PASS / FAIL / INCOMPLETE
             and Reliability re-review
                 O->>RR: evaluate(baseline-plan.json, remediated-plan.json)
+                RR->>RR: extract evidence, then judge against REL-001 / BR-001
                 RR-->>O: PASS / FAIL / INCOMPLETE
             end
             O->>Dev: SAFE_TO_SHIP only if both PASS and Terraform execution succeeded (scope caveat: 4 rules only); otherwise blocked
@@ -165,31 +179,36 @@ Both plan-generation calls (baseline and candidate/remediated) run the identical
 
 Step 5's stdout is written verbatim to the target artifact path. The tool performs no interpretation of the JSON — see "Terraform Plan Tool" below.
 
-### JSON paths inspected per rule
+### JSON paths inspected per rule (evidence extraction, not rule evaluation)
 
-All four rules read from the plan JSON's top-level `resource_changes` array (the standard `terraform show -json` schema), matching entries by `.address`, and reading only `.change.after` (never `.change.before`):
+The following specifications describe what **Evidence Extraction** does (`scripts/security_rules.py` for SEC-001/SEC-002, `scripts/reliability_rules.py` for REL-001/BR-001): reading the plan JSON's top-level `resource_changes` array (the standard `terraform show -json` schema), matching entries by `.address`, and reading only `.change.after` (never `.change.before`), to produce a plain evidence record. Extraction never decides `PASS`/`FAIL`/`INCOMPLETE` — it hands the extracted facts to the Security Reviewer or Reliability Reviewer agent, which is the sole component that judges whether the fact pattern satisfies the rule and produces the `Finding`/`ReviewResult` (Requirements 5.10, 5.11, 6.10, 6.11).
 
-**SEC-001 — TCP/22 becomes public**
+**SEC-001 — TCP/22 evidence**
 - Resource: `resource_changes[] | select(.address == "aws_security_group.payments_sg")`
-- Field: `.change.after.ingress[]` — an array of ingress block objects, each with `.from_port`, `.to_port`, `.protocol`, `.cidr_blocks` (array of strings)
-- Match rule: the ingress entry where `from_port <= 22 <= to_port` and `protocol` is `"tcp"` (or `"-1"`)
-- Finding condition: in Baseline, that entry's `cidr_blocks` does **not** contain `"0.0.0.0/0"`; in Candidate/Remediated, the corresponding entry's `cidr_blocks` **does** contain `"0.0.0.0/0"`
+- Field extracted: `.change.after.ingress[]` — an array of ingress block objects, each with `.from_port`, `.to_port`, `.protocol`, `.cidr_blocks` (array of strings)
+- Match rule for extraction: the ingress entry where `from_port <= 22 <= to_port` and `protocol` is `"tcp"` (or `"-1"`)
+- Evidence record shape: `{resource: "aws_security_group.payments_sg", baseline: {cidr_blocks: [...]}, candidate: {cidr_blocks: [...]}}` (or an evidence-unavailable/malformed signal — see below)
+- The fact pattern the Security Reviewer evaluates against SEC-001: in Baseline, the extracted entry's `cidr_blocks` does **not** contain `"0.0.0.0/0"`; in Candidate/Remediated, the corresponding entry's `cidr_blocks` **does** contain `"0.0.0.0/0"`. The Security Reviewer, not `security_rules.py`, decides whether this fact pattern constitutes a `FAIL`.
 
-**SEC-002 — TCP/5432 becomes public**
+**SEC-002 — TCP/5432 evidence**
 - Same resource and field path as SEC-001, but matching the ingress entry where `from_port <= 5432 <= to_port`
-- Same finding condition, applied to port 5432 instead of port 22
+- Baseline symmetry: `terraform/main.tf`'s baseline configuration defines an explicit second ingress block for TCP/5432 (alongside the explicit TCP/22 block), so the Baseline Plan always contains an explicit ingress entry for port 5432 with `cidr_blocks == ["10.0.0.0/8"]` — this is not inferred or defaulted, it is read directly from the Baseline Plan's `.change.after.ingress[]`, symmetric with SEC-001. Because the baseline entry is explicit, remediation restores the exact baseline CIDR for either rule (the port-22 baseline CIDR for SEC-001, the port-5432 baseline CIDR for SEC-002) rather than inventing a value.
+- Evidence record shape: `{resource: "aws_security_group.payments_sg", baseline: {cidr_blocks: [...]}, candidate: {cidr_blocks: [...]}}`, same shape as SEC-001, keyed to the port-5432 ingress entry
+- The fact pattern the Security Reviewer evaluates against SEC-002: same condition as SEC-001, applied to port 5432 instead of port 22. The Security Reviewer, not `security_rules.py`, decides whether this fact pattern constitutes a `FAIL`.
 
-**REL-001 — ECS desired_count drops to 1**
+**REL-001 — ECS desired_count evidence**
 - Resource: `resource_changes[] | select(.address == "aws_ecs_service.payments_api")`
-- Field: `.change.after.desired_count` (integer)
-- Finding condition: Baseline `desired_count >= 3` and Candidate/Remediated `desired_count == 1`
+- Field extracted: `.change.after.desired_count` (integer)
+- Evidence record shape: `{resource: "aws_ecs_service.payments_api", baseline: {desired_count: <int>}, candidate: {desired_count: <int>}}`
+- The fact pattern the Reliability Reviewer evaluates against REL-001: Baseline `desired_count >= 3` and Candidate/Remediated `desired_count == 1`. The Reliability Reviewer, not `reliability_rules.py`, decides whether this fact pattern constitutes a `FAIL`.
 
-**BR-001 — RDS deletion_protection disabled**
+**BR-001 — RDS deletion_protection evidence**
 - Resource: `resource_changes[] | select(.address == "aws_db_instance.payments_db")`
-- Field: `.change.after.deletion_protection` (boolean)
-- Finding condition: Baseline `deletion_protection == true` and Candidate/Remediated `deletion_protection == false`
+- Field extracted: `.change.after.deletion_protection` (boolean)
+- Evidence record shape: `{resource: "aws_db_instance.payments_db", baseline: {deletion_protection: <bool>}, candidate: {deletion_protection: <bool>}}`
+- The fact pattern the Reliability Reviewer evaluates against BR-001: Baseline `deletion_protection == true` and Candidate/Remediated `deletion_protection == false`. The Reliability Reviewer, not `reliability_rules.py`, decides whether this fact pattern constitutes a `FAIL`.
 
-For every rule, if the resource address is missing from either plan, if the field is absent or not the expected type, or if the ingress array has no entry covering the relevant port, the reviewer treats the evidence as insufficient and reports **no finding** for that rule (Requirements 3.3, 5.6, 6.6) rather than guessing.
+For every rule, if the resource address is missing from either plan, if the field is absent or not the expected type, or if the ingress array has no entry covering the relevant port, `security_rules.py`/`reliability_rules.py` returns an evidence-unavailable/malformed signal rather than a fabricated evidence record. The calling Reviewer Agent treats that signal as insufficient evidence and returns `INCOMPLETE` for that rule (Requirements 3.3, 5.6, 5.9, 6.6, 6.9) — never a silent `PASS` and never a fabricated `FAIL`.
 
 ## Components and Interfaces
 
@@ -202,17 +221,24 @@ For every rule, if the resource address is missing from either plan, if the fiel
 
 ### Security Reviewer (Kiro Crew agent — read-only)
 
-- **Role**: evaluates SEC-001 and SEC-002 only, using the JSON paths defined above.
-- **Allowed inputs**: paths to exactly two plan JSON artifacts (Baseline + Candidate, or Baseline + Remediated), supplied by the Orchestrator.
+- **Role**: the LLM-driven agent that determines whether deterministically extracted evidence satisfies SEC-001 or SEC-002, and produces the resulting `ReviewResult`. It invokes the `security_rules.py` evidence-extraction library to obtain a plain evidence record for each rule (see "JSON paths inspected per rule" above), then judges — itself, not the library — whether that evidence's fact pattern satisfies SEC-001 or SEC-002. The Security Reviewer is the only component authorized to decide `PASS`, `FAIL`, or `INCOMPLETE`, or to produce a finding, for SEC-001 or SEC-002 (Requirement 5.11); deterministic code never makes this decision (Requirement 5.10).
+- **Allowed inputs**: paths to exactly two plan JSON artifacts (Baseline + Candidate, or Baseline + Remediated), supplied by the Orchestrator. The Security Reviewer passes these paths to `security_rules.py` and receives back, per rule, either a plain evidence record (e.g. `{resource: str, baseline: {cidr_blocks: [...]}, candidate: {cidr_blocks: [...]}}`) or an evidence-unavailable/malformed signal — never a verdict.
 - **Allowed outputs**: a `ReviewResult` with `status ∈ {PASS, FAIL, INCOMPLETE}` (Requirements 5.7, 5.8, 5.9) and, when `status` is `FAIL`, a list of one or more findings, each shaped as the `CHANGE_BLOCKED` finding record (see "Human Approval Gate" below), restricted to `rule_id ∈ {SEC-001, SEC-002}`.
-- **Permission boundary**: read-only. It cannot write any file, cannot execute `apply_remediation.py` or any Terraform command, and cannot report any security observation outside SEC-001/SEC-002 (Requirement 5). If evaluation of SEC-001 or SEC-002 fails to complete (exception, timeout, malformed input encountered mid-check), it must return `INCOMPLETE` and must not emit a finding — or a `PASS` — for the rule that didn't finish (Requirement 5.9) — see "Error Handling."
+- **Permission boundary**: read-only. It cannot write any file, cannot execute `apply_remediation.py` or any Terraform command, and cannot report any security observation outside SEC-001/SEC-002 (Requirement 5). It may only invoke `security_rules.py` for evidence extraction — that library itself cannot write any file or return a verdict. If evidence extraction returns an evidence-unavailable/malformed signal for SEC-001 or SEC-002, or if the Security Reviewer's own judgment step fails to complete (exception, timeout, malformed input encountered mid-check), it must return `INCOMPLETE` and must not emit a finding — or a `PASS` — for the rule that didn't finish (Requirement 5.9) — see "Error Handling."
 
 ### Reliability Reviewer (Kiro Crew agent — read-only)
 
-- **Role**: evaluates REL-001 and BR-001 only, using the JSON paths defined above.
-- **Allowed inputs**: the same two-artifact-path input shape as the Security Reviewer.
+- **Role**: the LLM-driven agent that determines whether deterministically extracted evidence satisfies REL-001 or BR-001, and produces the resulting `ReviewResult`. It invokes the `reliability_rules.py` evidence-extraction library to obtain a plain evidence record for each rule (see "JSON paths inspected per rule" above), then judges — itself, not the library — whether that evidence's fact pattern satisfies REL-001 or BR-001. The Reliability Reviewer is the only component authorized to decide `PASS`, `FAIL`, or `INCOMPLETE`, or to produce a finding, for REL-001 or BR-001 (Requirement 6.11); deterministic code never makes this decision (Requirement 6.10).
+- **Allowed inputs**: the same two-artifact-path input shape as the Security Reviewer. The Reliability Reviewer passes these paths to `reliability_rules.py` and receives back, per rule, either a plain evidence record (e.g. `{resource: str, baseline: {desired_count: <int>}, candidate: {desired_count: <int>}}`) or an evidence-unavailable/malformed signal — never a verdict.
 - **Allowed outputs**: a `ReviewResult` with `status ∈ {PASS, FAIL, INCOMPLETE}` (Requirements 6.7, 6.8, 6.9) and, when `status` is `FAIL`, a list of one or more findings restricted to `rule_id ∈ {REL-001, BR-001}`.
-- **Permission boundary**: read-only, identical constraints to the Security Reviewer, plus: if evaluation of REL-001 or BR-001 fails to complete (exception, timeout, malformed input encountered mid-check), it must return `INCOMPLETE` and must not emit a finding — or a `PASS` — for the rule that didn't finish (Requirement 6.9) — see "Error Handling."
+- **Permission boundary**: read-only, identical constraints to the Security Reviewer, plus: it may only invoke `reliability_rules.py` for evidence extraction — that library itself cannot write any file or return a verdict. If evidence extraction returns an evidence-unavailable/malformed signal for REL-001 or BR-001, or if the Reliability Reviewer's own judgment step fails to complete (exception, timeout, malformed input encountered mid-check), it must return `INCOMPLETE` and must not emit a finding — or a `PASS` — for the rule that didn't finish (Requirement 6.9) — see "Error Handling."
+
+### Security/Reliability Evidence Extraction — `scripts/security_rules.py` / `scripts/reliability_rules.py`
+
+- **Role**: plain, directly-importable Python 3 stdlib libraries (not CLI tools) invoked in-process by the Security Reviewer and Reliability Reviewer respectively. Each performs the JSON-path reads and type/presence checks described in "JSON paths inspected per rule" above and returns, per rule, a plain evidence record or an evidence-unavailable/malformed signal.
+- **Allowed inputs**: paths to two plan JSON artifacts (Baseline + Candidate, or Baseline + Remediated), and the rule ID(s) to extract evidence for.
+- **Allowed outputs**: a plain evidence record shaped as `{resource: str, baseline: {<field>: value}, candidate: {<field>: value}}`, or an evidence-unavailable/malformed signal when the resource address, field, or expected type is not present. It never returns `PASS`, `FAIL`, `INCOMPLETE`, a `Finding`, a severity, or a remediation decision (Requirements 5.10, 6.10) — the calling Reviewer Agent is solely responsible for judging the evidence and producing the `ReviewResult`.
+- **Permission boundary**: read-only, in-process library code, no file-write capability, no verdict-producing capability. This is what allows the Security Reviewer / Reliability Reviewer agents to remain the sole deciders of `PASS`/`FAIL`/`INCOMPLETE` for their respective rules.
 
 ### Remediator (Kiro Crew agent — post-approval only, decides WHAT)
 
@@ -258,7 +284,7 @@ Because there is no data dependency between the two calls, the Orchestrator issu
 ### Remediation Script — `scripts/apply_remediation.py`
 
 - **CLI contract**: `python3 scripts/apply_remediation.py --terraform-dir <path> --rule-id <SEC-001|SEC-002|REL-001|BR-001> --resource <address> --restore-value <value>`
-- **Behavior**: looks up `--rule-id` in a fixed 4-entry whitelist mapping `rule_id → (expected resource type, expected HCL attribute/block, value type)`. If `--rule-id` is not one of the four supported IDs, or `--resource` does not match the expected resource type/address for that rule, the script exits non-zero and writes nothing (Requirement 9.7's script-level backstop). If it matches, the script performs one narrowly scoped, targeted edit to `terraform/main.tf` — e.g. rewriting the `cidr_blocks` list on the matched port-22 ingress block, the `desired_count` value, or the `deletion_protection` value — and nothing else in the file.
+- **Behavior**: looks up `--rule-id` in a fixed 4-entry whitelist mapping `rule_id → (expected resource type, expected HCL attribute/block, value type)`. If `--rule-id` is not one of the four supported IDs, or `--resource` does not match the expected resource type/address for that rule, the script exits non-zero and writes nothing (Requirement 9.7's script-level backstop). If it matches, the script performs one narrowly scoped, targeted edit to `terraform/main.tf` — e.g. rewriting the `cidr_blocks` list on the matched port-22 ingress block (SEC-001), the `cidr_blocks` list on the matched port-5432 ingress block (SEC-002), the `desired_count` value, or the `deletion_protection` value — and nothing else in the file. For SEC-002, the restore target is the existing baseline port-5432 ingress entry's `cidr_blocks` value (`["10.0.0.0/8"]`, already present in `terraform/main.tf`'s explicit second ingress block) — the script restores that exact baseline CIDR, symmetric with SEC-001, never a newly invented value.
 - **Explicitly excluded**: any generic "write these bytes to this path" capability (Requirement 9.5). The script has no file-path argument other than `--terraform-dir`, and no free-form content argument other than the single, type-checked `--restore-value` for the one whitelisted attribute the given `--rule-id` is allowed to touch.
 - **WHAT vs. HOW split**: the Remediator (LLM agent) decides *which* finding to act on and *what* the restore value should be (always sourced from that finding's recorded `baseline_value`, never invented). The script decides *how* the edit is mechanically performed — the exact text/AST manipulation of `terraform/main.tf` — and independently validates that the requested value is of the correct type for the rule (int for REL-001, bool for BR-001, a CIDR-list string for SEC-001/SEC-002) before writing.
 
@@ -281,7 +307,8 @@ Standard `terraform show -json` output, unmodified. The fields ChangeGuard relie
         "before": null,
         "after": {
           "ingress": [
-            { "from_port": 22, "to_port": 22, "protocol": "tcp", "cidr_blocks": ["10.0.0.0/8"] }
+            { "from_port": 22, "to_port": 22, "protocol": "tcp", "cidr_blocks": ["10.0.0.0/8"] },
+            { "from_port": 5432, "to_port": 5432, "protocol": "tcp", "cidr_blocks": ["10.0.0.0/8"] }
           ]
         }
       }
@@ -349,19 +376,19 @@ This design does not use a generator/shrinking property-based testing (PBT) libr
 
 ### Property 1: Two-genuine-plan evidence requirement
 
-For all findings reported by the ChangeGuard System, the finding is derived only from comparing the `.change.after` values of two genuine Terraform plan JSON artifacts (Baseline vs. Candidate, or Baseline vs. Remediated); no finding is ever derived from Terraform source code alone, and no finding is ever derived from the `before`/`after` fields within a single plan.
+For all findings reported by the ChangeGuard System, the finding is derived only from comparing the `.change.after` values of two genuine Terraform plan JSON artifacts (Baseline vs. Candidate, or Baseline vs. Remediated); no finding is ever derived from Terraform source code alone, and no finding is ever derived from the `before`/`after` fields within a single plan. Insufficient evidence (a missing resource address, an absent or malformed field, or an ingress array with no entry covering the relevant port) is distinct from the absence of a finding: it is reported as `INCOMPLETE`, never conflated with a `PASS` and never fabricated into a `FAIL`.
 
-**Validates: Requirements 3.1, 3.2, 3.3, 3.4**
+**Validates: Requirements 3.1, 3.2, 3.3, 3.4, 5.6, 5.9, 6.6, 6.9**
 
-Verified by: `test_security_reviewer.py`, `test_reliability_reviewer.py`, `test_baseline_pass.py` — each fixture-based test supplies exactly two hand-constructed plan JSON files (baseline + candidate) and asserts on the resulting finding/PASS status; no test path evaluates a finding from `terraform/main.tf` source or from a single plan's own `before`/`after` pair.
+Verified by: `test_security_reviewer.py`, `test_reliability_reviewer.py`, `test_baseline_pass.py` — each fixture-based test supplies exactly two hand-constructed plan JSON files (baseline + candidate) and asserts on the resulting finding/PASS/INCOMPLETE status; no test path evaluates a finding from `terraform/main.tf` source or from a single plan's own `before`/`after` pair; a dedicated malformed/missing-field fixture asserts `INCOMPLETE` rather than `PASS` or a fabricated finding.
 
 ### Property 2: Reviewer output scope restriction
 
-For all findings returned by the Security Reviewer, `rule_id ∈ {SEC-001, SEC-002}`. For all findings returned by the Reliability Reviewer, `rule_id ∈ {REL-001, BR-001}`.
+For all findings returned by the Security Reviewer, `rule_id ∈ {SEC-001, SEC-002}`. For all findings returned by the Reliability Reviewer, `rule_id ∈ {REL-001, BR-001}`. In both cases, the `rule_id`-scoped judgment (PASS/FAIL/INCOMPLETE) is made by the Reviewer Agent itself from an evidence record supplied by `security_rules.py`/`reliability_rules.py`; the evidence-extraction library never returns a finding, a severity, or a verdict of its own.
 
-**Validates: Requirements 5.1, 5.5, 6.1, 6.5**
+**Validates: Requirements 5.1, 5.5, 5.10, 5.11, 6.1, 6.5, 6.10, 6.11**
 
-Verified by: `test_security_reviewer.py` (asserts every returned finding's `rule_id` is `SEC-001` or `SEC-002` across the SEC-001, SEC-002, and safe fixtures), `test_reliability_reviewer.py` (asserts every returned finding's `rule_id` is `REL-001` or `BR-001` across the REL-001, BR-001, and safe fixtures).
+Verified by: `test_security_reviewer.py` (asserts every returned finding's `rule_id` is `SEC-001` or `SEC-002` across the SEC-001, SEC-002, and safe fixtures, and that `security_rules.py`'s extraction functions return only evidence records/unavailable-signals, never a status), `test_reliability_reviewer.py` (same, for `rule_id ∈ {REL-001, BR-001}` and `reliability_rules.py`).
 
 ### Property 3: No modification without prior human approval
 
@@ -427,9 +454,9 @@ Together, the Kiro hook (workspace-wide, pattern-based) and the in-script allow-
 ## Error Handling
 
 - **Terraform command failures** (any of `init`/`fmt -check`/`validate`/`plan`/`show` exiting non-zero): the Terraform Plan Tool aborts immediately, writes nothing to the target artifact path (no partial/corrupt JSON), and returns a non-zero exit status plus the captured stderr. The Orchestrator treats this as a workflow-level failure distinct from both verdicts — it does not proceed to invoke either reviewer, since Requirement 3 requires two genuine plans and only one (or zero) exist at that point.
-- **Malformed or missing plan JSON**: before evaluating any rule, each reviewer confirms the target file parses as JSON and that the specific resource address and field path for that rule are present with the expected type. Any failure here is treated identically to "insufficient evidence" (see next point), not as a crash that produces a false PASS.
-- **Insufficient evidence must not fabricate findings** (Requirement 3): every rule-check function's default outcome is *no finding*. A finding is only emitted when the function can positively read both the expected baseline condition and the expected candidate/remediated transition value from parsed JSON. Missing fields, missing resource addresses, unexpected types, or an ingress array with no entry covering the relevant port all fall through to "no finding" rather than an assumed violation.
-- **Reviewer incomplete evaluation** (Requirements 5.9, 6.9): if evaluating any of its supported rules (SEC-001/SEC-002 for the Security Reviewer, REL-001/BR-001 for the Reliability Reviewer) raises an exception, times out, or otherwise fails to complete, that reviewer does not report a finding — or a `PASS` — for the rule that didn't finish. It returns `INCOMPLETE` as its `ReviewResult.status` for that comparison cycle, and the Orchestrator treats `INCOMPLETE` as blocking a `SAFE_TO_SHIP` verdict for that comparison cycle, independent of and in addition to a `FAIL` result (Requirement 10.5) — an incomplete evaluation is not evidence of safety, so it cannot be silently treated as PASS.
+- **Malformed or missing plan JSON**: before extracting evidence for any rule, `security_rules.py`/`reliability_rules.py` confirms the target file parses as JSON and that the specific resource address and field path for that rule are present with the expected type. Any failure here is treated identically to "insufficient evidence" (see next point), not as a crash that produces a false PASS.
+- **Insufficient evidence must produce INCOMPLETE, never a silent PASS or a fabricated FAIL** (Requirement 3, 5.6, 5.9, 6.6, 6.9): every evidence-extraction function's default outcome, when it cannot positively read both the expected baseline condition and the expected candidate/remediated value from parsed JSON, is an evidence-unavailable/malformed signal — never a fabricated evidence record and never a verdict of its own (extraction never returns `PASS`/`FAIL`/`INCOMPLETE`; see Requirements 5.10, 6.10). Missing fields, missing resource addresses, unexpected types, or an ingress array with no entry covering the relevant port all produce this signal. When the calling Reviewer Agent receives it for a rule, the Reviewer Agent reports `INCOMPLETE` for that rule — not `PASS` (a missing fact is not evidence of safety) and not a fabricated `FAIL` (a missing fact is not evidence of a violation).
+- **Reviewer incomplete evaluation** (Requirements 5.9, 6.9): if evidence extraction returns an evidence-unavailable/malformed signal for any of a reviewer's supported rules (SEC-001/SEC-002 for the Security Reviewer, REL-001/BR-001 for the Reliability Reviewer), or if the reviewer's own judgment step raises an exception, times out, or otherwise fails to complete, that reviewer does not report a finding — or a `PASS` — for the rule that didn't finish. It returns `INCOMPLETE` as its `ReviewResult.status` for that comparison cycle, and the Orchestrator treats `INCOMPLETE` as blocking a `SAFE_TO_SHIP` verdict for that comparison cycle, independent of and in addition to a `FAIL` result (Requirement 10.5) — an incomplete evaluation is not evidence of safety, so it cannot be silently treated as PASS.
 - **SAFE_TO_SHIP is blocked independently by FAIL, INCOMPLETE, or execution/tool error** (Requirements 10.3–10.6): the Orchestrator reports `SAFE_TO_SHIP` only when the relevant Terraform plan execution succeeded and both the Security Reviewer and the Reliability Reviewer returned `PASS`. A `FAIL` from either reviewer, an `INCOMPLETE` from either reviewer, and a Terraform plan generation failure or any tool-reported error are each, on their own, sufficient to block `SAFE_TO_SHIP` — the Orchestrator does not require more than one of these conditions to withhold the verdict, and none of them can be overridden by a PASS from the other reviewer.
 - **Unsupported rule IDs during remediation** (Requirement 9.7): this should be unreachable given the reviewers' fixed scope, but is defended in two places anyway. The Remediator refuses to act on any finding whose `rule_id` is not one of the four supported IDs (blocks that finding's remediation, does not invoke the script). Independently, `apply_remediation.py` re-validates `--rule-id` against its own whitelist and exits non-zero with no file write if it ever receives anything else — the same defense-in-depth pattern used for the Safety Hook's secondary layer.
 
@@ -451,20 +478,27 @@ Two kinds of tests cover the six scenarios in Requirement 12:
 ```text
 tests/
 ├── fixtures/
-│   ├── baseline_plan.json          # safe config, port 22 -> 10.0.0.0/8, desired_count=3, deletion_protection=true
+│   ├── baseline_plan.json          # safe config, port 22 -> 10.0.0.0/8, port 5432 -> 10.0.0.0/8 (explicit, symmetric), desired_count=3, deletion_protection=true
 │   ├── candidate_sec001.json       # port 22 -> 0.0.0.0/0
 │   ├── candidate_sec002.json       # port 5432 -> 0.0.0.0/0
 │   ├── candidate_rel001.json       # desired_count -> 1
 │   ├── candidate_br001.json        # deletion_protection -> false
 │   └── candidate_safe.json         # no supported transition (used for the PASS scenario)
-├── test_security_reviewer.py       # Req 12.3 (SEC-001 FAIL), 12.4 (SEC-002 FAIL), plus PASS/no-finding cases
-├── test_reliability_reviewer.py    # Req 12.5 (REL-001 FAIL), 12.6 (BR-001 FAIL), plus PASS/no-finding cases
-├── test_baseline_pass.py           # Req 12.2 (safe baseline vs. candidate_safe -> PASS)
-├── test_remediation_script.py      # Req 12.7 (apply_remediation.py corrects terraform/main.tf), integration, skip-if-no-terraform
-└── test_remediated_plan.py         # Req 12.8 (remediated plan -> PASS), integration, skip-if-no-terraform
+├── test_security_reviewer.py       # Req 12.3 (SEC-001 FAIL), 12.4 (SEC-002 FAIL), plus PASS/INCOMPLETE cases — mandatory
+├── test_reliability_reviewer.py    # Req 12.5 (REL-001 FAIL), 12.6 (BR-001 FAIL), plus PASS/INCOMPLETE cases — mandatory
+├── test_baseline_pass.py           # Req 12.2 (safe baseline vs. candidate_safe -> PASS) — mandatory
+├── test_remediation_script.py      # Req 12.7, 12.9 (apply_remediation.py corrects terraform/main.tf; unsupported-rule-ID rejection), integration, skip-if-no-terraform — mandatory
+├── test_remediated_plan.py         # Req 12.8 (remediated plan -> PASS), integration, skip-if-no-terraform — mandatory
+└── test_end_to_end_workflow.py     # optional: full Kiro Crew end-to-end automation (Req 12.11) — see "Mandatory vs. optional tests" below
 ```
 
 Each test module maps to one or more Requirement 12 acceptance criteria; no test in this layout targets anything outside the four supported rule IDs or the remediation round-trip.
+
+### Mandatory vs. optional tests (Requirements 12.10, 12.11)
+
+Per Requirement 12.10, the following are **mandatory**: `test_security_reviewer.py` (SEC-001 and SEC-002 Security Reviewer scenarios), `test_reliability_reviewer.py` (REL-001 and BR-001 Reliability Reviewer scenarios), `test_baseline_pass.py` (safe baseline `PASS` scenario), and the deterministic Remediation Script tests in `test_remediation_script.py` — including the unsupported-rule-ID rejection case (Requirement 12.9). `test_remediated_plan.py` is also mandatory: it verifies Requirement 12.8 (the Remediated Plan produces `PASS`), which Requirement 12.10 does not list among the tests that may be treated as optional, and Requirement 12.11 only makes an exception for full end-to-end Kiro Crew automation tests, not for `test_remediated_plan.py`.
+
+Per Requirement 12.11, a full Kiro Crew end-to-end automation test (`test_end_to_end_workflow.py` or equivalent) **may** be treated as optional, because it requires runtime agent behavior that is difficult to automate reliably. Regardless of whether that optional test exists in a given implementation, the five-minute manual judge workflow described in "Five-Minute Demo Walkthrough" below remains the authoritative end-to-end demonstration of the system (Requirement 13) — the optional automation test, if present, is a convenience check on top of that authoritative manual walkthrough, not a replacement for it.
 
 ## Five-Minute Demo Walkthrough
 
