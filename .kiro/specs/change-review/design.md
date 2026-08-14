@@ -38,7 +38,7 @@ flowchart TB
     end
 
     subgraph Safety["Safety Enforcement"]
-        Hook["Safety Hook<br/>.kiro/hooks/ (preToolUse)"]
+        Hook["Safety Guard<br/>scripts/safety_guard.py<br/>(per-agent preToolUse hook)"]
         Guard["Secondary code-level guard<br/>(subcommand allow-list in both scripts)"]
     end
 
@@ -78,7 +78,7 @@ Kiro-specific mapping:
 - Orchestrator, Security Reviewer, Reliability Reviewer, and Remediator are each defined as a separate Kiro Crew custom agent under `.kiro/agents/` (created during implementation, not in this design phase).
 - `run_tf_plan.py` and `apply_remediation.py` are plain Python 3 stdlib scripts under `scripts/`, invoked by agents as tools — they contain no LLM calls and no rule logic.
 - `security_rules.py` and `reliability_rules.py` are plain Python 3 stdlib evidence-extraction libraries under `scripts/`, invoked in-process by the Security Reviewer and Reliability Reviewer agents respectively. They contain no LLM calls and never return a verdict (`PASS`/`FAIL`/`INCOMPLETE`), a Finding, a severity, or a remediation decision — only a plain evidence record or an evidence-unavailable/malformed signal. The rule-satisfaction judgment and the resulting `ReviewResult` are produced by the agent itself.
-- The Safety Hook is a Kiro hook under `.kiro/hooks/`, registered as `preToolUse` against shell-executing tool calls workspace-wide (not scoped to a single agent), matching Requirement 11's "network-wide" intent.
+- The Safety Guard is a Kiro `preToolUse` hook (`scripts/safety_guard.py`) embedded in the `hooks.preToolUse` field of each ChangeGuard agent's own JSON config under `.kiro/agents/` — the installed CLI version has no standalone `.kiro/hooks/` mechanism and no workspace-wide hook scope, so the guard is attached individually to every agent that holds a `shell` tool (see the discrepancy note in "Kiro Hook / Safety Strategy" below).
 - `artifacts/` and `terraform/main.tf` are the only pieces of on-disk state the workflow reads or writes.
 
 ## End-to-End Workflow
@@ -416,26 +416,28 @@ Verified by: `test_baseline_pass.py` (safe baseline vs. `candidate_safe.json` �
 
 ## Kiro Hook / Safety Strategy
 
-### Primary enforcement — Safety Hook
+> **Installed-CLI discrepancy note (resolved during implementation):** this section originally assumed a standalone `.kiro/hooks/*.json` v1-schema file providing a single, truly workspace-wide `preToolUse` hook (`toolTypes: "shell"`), independent of any one agent's configuration. Empirical discovery against the actually-installed `kiro-cli 2.18.0` (via `kiro-cli agent validate`, `kiro-cli agent --help`, and live `kiro-cli chat --agent <agent> --no-interactive` invocations capturing real hook stdin payloads) showed that CLI version predates that mechanism: it has no `.kiro/hooks/` support and no `hook` subcommand at all. Its `preToolUse` hook is instead an **embedded field inside each agent's own JSON config** (`hooks.preToolUse: [{"matcher": "execute_bash", "command": "<shell command>"}]`), and hooks are therefore **agent-scoped, not workspace-wide** — a workspace-level agent-name override (e.g. redefining the built-in default agent) does not take effect in this CLI version. The sections below describe the mechanism as actually implemented; the "workspace-wide" framing further below is retained only for the future-facing intent, not as a claim about the current installed CLI's actual behavior.
 
-A single Kiro hook, registered as `preToolUse` with `toolTypes: "shell"` (or the workspace's equivalent broad shell/command-execution category), applied workspace-wide rather than scoped to a single agent or task. Before any shell-executing tool call runs anywhere in the workspace during ChangeGuard's operation, the hook inspects the literal command text and denies execution if it matches any of:
+### Primary enforcement — Safety Guard
+
+A deterministic Python 3 stdlib script, `scripts/safety_guard.py`, registered as each ChangeGuard agent's `preToolUse` hook (matcher `execute_bash`) via that agent's own JSON config — not a standalone workspace-wide hook file, per the discrepancy note above. It is attached to the Security Reviewer, Reliability Reviewer, and Remediator agent configs (the three ChangeGuard agents that hold a `shell` tool). Before any shell-executing tool call from one of these agents runs, Kiro pipes a JSON payload describing the proposed command to the script's stdin; the script inspects the literal command text (shell-tokenized, so trivial whitespace/quoting/argument-ordering differences and simple `;`/`&&`/`||`/`|` chaining do not bypass it) and denies execution if it matches any of:
 
 - contains `terraform apply`
 - contains `terraform destroy`
-- matches an AWS CLI invocation pattern (command begins with or contains a standalone `aws` subcommand token)
-- contains a destructive filesystem operation, including but not limited to `rm -rf` / `rm -fr` / recursive-force variants
+- matches an AWS CLI invocation pattern (a bare `aws` token, or a path ending in `/aws`, appearing as its own command token)
+- contains a destructive filesystem operation: `rm` combined with both a recursive flag (`-r`/`-R`/`--recursive`, including the combined `-rf`/`-fr` short forms) and a force flag (`-f`/`--force`), in any ordering
 
-On a match, the hook blocks the call and returns a denial explaining which pattern triggered it. This satisfies Requirement 11.1–11.4, and 11.5 is satisfied by construction: the hook's matching logic is purely textual/pattern-based — it never parses plan JSON, never compares baseline/candidate/remediated values, and has no notion of SEC-001/SEC-002/REL-001/BR-001. It enforces *safety*, not *rule detection*.
+The script signals its decision via process exit code, per this installed CLI's empirically-verified `preToolUse` contract: exit `0` allows the call to proceed; exit `2` blocks it, with the script's stderr surfaced to the agent as the denial reason. (Exit code `1` was empirically confirmed to *not* block the tool call in this CLI version, so the script only ever exits `0` or `2`, never anything else.) This satisfies Requirement 11.1–11.4, and 11.5 is satisfied by construction: the script's matching logic is purely textual/token-based — it never parses plan JSON, never compares baseline/candidate/remediated values, and has no notion of SEC-001/SEC-002/REL-001/BR-001. It enforces *safety*, not *rule detection*. It also fails closed: malformed, unparseable, or missing hook input is treated as a denial, never as an all-clear.
 
 ### Secondary enforcement — code-level guard (Requirement 11.6)
 
-The hook is the primary layer, but Requirement 11.6 requires a fallback that still prevents execution if the hook itself fails to fire. That fallback is built directly into both deterministic scripts, independent of Kiro's hook subsystem:
+The safety guard hook is the primary layer, but Requirement 11.6 requires a fallback that still prevents execution if the hook itself fails to fire (e.g. a future agent config change accidentally drops the `hooks.preToolUse` entry). That fallback is built directly into both deterministic scripts, independent of Kiro's hook subsystem:
 
 - `run_tf_plan.py` and `apply_remediation.py` never build shell strings; they invoke Terraform (and, in the remediation script's case, no external command at all beyond file editing) via fixed argv lists.
 - Both scripts check the subcommand/operation they are about to perform against a hardcoded allow-list (`{init, fmt, validate, plan, show}` for the plan tool; the 4-entry rule-ID whitelist for the remediation script) *before* calling `subprocess.run`. There is no code path in either script that can construct an `apply`, `destroy`, or `aws` invocation — the guard isn't a runtime check that could be bypassed by unusual input, it's the absence of any capability to invoke those commands at all.
 - Additionally, `terraform/versions.tf` configures the AWS provider with fake credentials and `skip_credentials_validation` / `skip_metadata_api_check` / `skip_requesting_account_id`, so even a hypothetical `apply` call would fail before touching any real AWS account — a structural, environment-level backstop beyond the two code-level layers.
 
-Together, the Kiro hook (workspace-wide, pattern-based) and the in-script allow-lists (capability-based, per-script) form the two independent layers Requirement 11.6 calls for.
+Together, the per-agent safety guard hook (pattern-based, attached to every ChangeGuard agent holding a `shell` tool) and the in-script allow-lists (capability-based, per-script) form the two independent layers Requirement 11.6 calls for. Per the discrepancy note above, this protection is **agent-scoped in the installed CLI version**, not truly workspace-wide: it is attached to the Security Reviewer, Reliability Reviewer, and Remediator agent configs (every ChangeGuard agent that currently holds a `shell` tool), and the future Orchestrator agent's config must carry the same `hooks.preToolUse` entry when it is implemented, since a workspace-wide or built-in-agent-override mechanism is not available in this CLI version.
 
 ## Terraform Execution Strategy
 

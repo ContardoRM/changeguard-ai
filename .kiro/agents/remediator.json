@@ -32,5 +32,13 @@
         "effect": "deny"
       }
     ]
+  },
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "execute_bash",
+        "command": "python3 scripts/safety_guard.py"
+      }
+    ]
   }
 }
