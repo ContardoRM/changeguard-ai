@@ -1,0 +1,79 @@
+{
+  "name": "crew-runner",
+  "description": "Restricted, run-scoped Kiro CLI agent used exclusively as the execution session for Kiro Crew's TaskRunner DAG nodes in the ChangeGuard workflow. Executes exactly the ChangeGuard transport/tool command named in a Crew Task's prompt and reports success/failure. Implements no SEC/REL/BR policy judgment, no remediation decision, and never invokes scripts/apply_remediation.py directly.",
+  "prompt": "file://./crew-runner-prompt.md",
+  "mcpServers": {},
+  "tools": ["shell"],
+  "toolAliases": {},
+  "allowedTools": ["shell"],
+  "resources": [
+    "file://.kiro/steering/changeguard-principles.md",
+    "file://.kiro/specs/change-review/requirements.md",
+    "file://.kiro/specs/change-review/design.md"
+  ],
+  "toolsSettings": {},
+  "includeMcpJson": false,
+  "model": null,
+  "permissions": {
+    "rules": [
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/run_tf_plan.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/run_agent_and_save.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/aggregate_review.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/run_remediation_stage.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/final_verdict.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/cleanup_run_artifacts.py *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["test -f artifacts/baseline-plan.json*"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
+        "match": ["python3 scripts/apply_remediation.py *"],
+        "effect": "deny"
+      },
+      {
+        "capability": "shell",
+        "match": ["*"],
+        "effect": "deny"
+      },
+      {
+        "capability": "fs_write",
+        "match": ["*"],
+        "effect": "deny"
+      }
+    ]
+  },
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "execute_bash",
+        "command": "python3 scripts/safety_guard.py"
+      }
+    ]
+  }
+}

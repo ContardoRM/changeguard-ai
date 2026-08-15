@@ -28,6 +28,78 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from scripts import changeguard_launch  # noqa: E402
 
 
+class PlanAndExecuteSupplyCrewRunnerAgentTestCase(unittest.TestCase):
+    """Stage A and Stage B must explicitly supply agent=crew-runner on
+    both the plan and execute calls -- never rely on Crew's default
+    kirocrew-lite persona (confirmed live: TaskRunner has exactly one
+    per-run agent for every task)."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="changeguard_launch_agent_test_")
+        self.addCleanup(self._cleanup)
+        self.workflow_path = os.path.join(self.tmp_dir, "workflow.yaml")
+        with open(self.workflow_path, "w") as f:
+            f.write("agents: {}\n")
+
+    def _cleanup(self):
+        import shutil
+
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_default_agent_constant_is_crew_runner(self):
+        self.assertEqual(changeguard_launch.CREW_RUNNER_AGENT, "crew-runner")
+
+    def test_plan_workflow_defaults_agent_field_to_crew_runner(self):
+        captured = {}
+
+        def fake_http_json(url, method, payload, timeout):
+            captured["payload"] = payload
+            return {"task_id": "t1", "steps": []}
+
+        with mock.patch.object(changeguard_launch, "_http_json", side_effect=fake_http_json):
+            changeguard_launch.plan_workflow("http://gw", self.workflow_path, 30.0)
+
+        self.assertEqual(captured["payload"].get("agent"), "crew-runner")
+
+    def test_execute_plan_defaults_agent_field_to_crew_runner(self):
+        captured = {}
+
+        def fake_http_json(url, method, payload, timeout):
+            captured["payload"] = payload
+            return {"ok": True}
+
+        with mock.patch.object(changeguard_launch, "_http_json", side_effect=fake_http_json):
+            changeguard_launch.execute_plan("http://gw", "t1", 30.0)
+
+        self.assertEqual(captured["payload"].get("agent"), "crew-runner")
+
+    def test_stage_a_plan_and_execute_both_supply_crew_runner_agent(self):
+        seen_agents = []
+
+        def fake_http_json(url, method, payload, timeout):
+            if isinstance(payload, dict) and "agent" in payload:
+                seen_agents.append(payload["agent"])
+            if url.endswith("/api/taskrunner/plan"):
+                return {"task_id": "stage-a-1", "steps": []}
+            if url.endswith("/execute"):
+                return {"ok": True}
+            raise AssertionError(f"unexpected call: {method} {url}")
+
+        args = changeguard_launch.parse_args(
+            [
+                "--gateway-url", "http://gw",
+                "--stage", "review",
+                "--review-workflow", self.workflow_path,
+                "--skip-cleanup",
+            ]
+        )
+        with mock.patch.object(changeguard_launch, "_http_json", side_effect=fake_http_json):
+            exit_code = changeguard_launch.run_review_stage(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(seen_agents, ["crew-runner", "crew-runner"])
+
+
 class FindTaskByNodeNameTestCase(unittest.TestCase):
     def test_matches_exactly_one_task(self):
         plan_response = {
@@ -185,6 +257,34 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
             exit_code = changeguard_launch.run_remediation_stage(args)
 
         self.assertEqual(exit_code, 1)
+
+    def test_stage_b_plan_and_execute_both_supply_crew_runner_agent(self):
+        with open(self.blocked_path, "w") as f:
+            f.write('{"status": "CHANGE_BLOCKED", "findings": []}')
+
+        plan_response = {
+            "task_id": "task-42",
+            "steps": [{"index": 1, "description": "remediation: gated node"}],
+        }
+        seen_agents = []
+
+        def fake_http_json(url, method, payload, timeout):
+            if isinstance(payload, dict) and "agent" in payload:
+                seen_agents.append(payload["agent"])
+            if method == "POST" and url.endswith("/api/taskrunner/plan"):
+                return plan_response
+            if method == "PATCH":
+                return {"force_approval": True}
+            if method == "POST" and url.endswith("/execute"):
+                return {"ok": True}
+            raise AssertionError(f"unexpected call: {method} {url}")
+
+        args = self._make_args()
+        with mock.patch.object(changeguard_launch, "_http_json", side_effect=fake_http_json):
+            exit_code = changeguard_launch.run_remediation_stage(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(seen_agents, ["crew-runner", "crew-runner"])
 
     def test_execute_not_called_when_no_task_matches(self):
         with open(self.blocked_path, "w") as f:

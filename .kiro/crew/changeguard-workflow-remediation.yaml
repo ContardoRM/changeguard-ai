@@ -22,6 +22,16 @@
 # cannot express `force_approval` at all — decompose_yaml()'s allowed key
 # set is exactly {agent, timeout, depends_on, description, prompt, shell}.
 #
+# EXECUTION SEMANTICS: same confirmed live-probe finding as Stage A (see
+# .kiro/crew/changeguard-workflow.yaml's header and design.md's "Kiro Crew
+# 0.2.0 Orchestration Mapping") — every node below is executed as an
+# LLM/ACP chat turn against the run-scoped `crew-runner` Kiro CLI agent
+# (`scripts/changeguard_launch.py` passes `agent: crew-runner` on both the
+# plan and execute calls for this file), not as a literal Crew-owned
+# subprocess. `prompt:` is used instead of `shell:` for the same reason as
+# Stage A: both keys are folded identically by decompose_yaml(), and
+# `prompt:` does not misleadingly suggest deterministic shell execution.
+#
 # Data flow (fixed artifact paths, same file-based mechanism as Stage A):
 #
 #   artifacts/change-blocked-result.json                 (read by remediation; produced by Stage A)
@@ -31,12 +41,18 @@
 #   artifacts/reliability-remediated-review-result.json  <- reliability-re-review
 #   artifacts/final-verdict.json  (authoritative)        <- final-verdict
 #
-# SAFETY: same fixed, non-interpolated shell command policy as Stage A —
-# never terraform apply/destroy, never an AWS CLI call, never rm -rf.
+# SAFETY: same fixed, non-interpolated command policy as Stage A — never
+# terraform apply/destroy, never an AWS CLI call, never rm -rf, and never
+# a direct invocation of scripts/apply_remediation.py by crew-runner
+# itself (that script is only ever reached via
+# scripts/run_remediation_stage.py -> the remediator Kiro CLI agent).
+# crew-runner's own permissions.rules explicitly deny
+# `python3 scripts/apply_remediation.py *` even though nothing in this
+# file names it, as an independent defense-in-depth layer.
 
 agents:
   remediation:
-    agent: remediator
+    agent: crew-runner
     description: >-
       GATED NODE — force_approval must already be true on this task
       (set by scripts/changeguard_launch.py via the plan/update/verify/
@@ -45,53 +61,51 @@ agents:
       result.json (guaranteed to exist, since this stage is only ever
       planned when it does) and invokes the remediator Kiro CLI agent
       once per approved, supported finding, passing ONLY that finding's
-      JSON — never raw plan JSON.
+      JSON — never raw plan JSON. crew-runner never calls
+      scripts/apply_remediation.py directly; only
+      scripts/run_remediation_stage.py (which in turn only ever invokes
+      the remediator agent) may reach it.
     timeout: 600
-    shell: >-
-      python3 scripts/run_remediation_stage.py
-      --blocked-input artifacts/change-blocked-result.json
-      --output artifacts/remediation-result.json
-      --terraform-dir terraform
+    prompt: >-
+      Execute exactly this command and no other command:
+      python3 scripts/run_remediation_stage.py --blocked-input artifacts/change-blocked-result.json --output artifacts/remediation-result.json --terraform-dir terraform
 
   remediated-plan:
-    agent: orchestrator
+    agent: crew-runner
     description: >-
       Generate the Remediated Plan from terraform/main.tf after approved
       remediation has been applied.
     depends_on: [remediation]
     timeout: 300
-    shell: >-
+    prompt: >-
+      Execute exactly this command and no other command:
       python3 scripts/run_tf_plan.py --terraform-dir terraform --output artifacts/remediated-plan.json
 
   security-re-review:
-    agent: security-reviewer
+    agent: crew-runner
     description: >-
       Re-invoke the security-reviewer agent to judge SEC-001/SEC-002 from
       Baseline vs. Remediated evidence.
     depends_on: [remediated-plan]
     timeout: 300
-    shell: >-
-      python3 scripts/run_agent_and_save.py
-      --agent security-reviewer
-      --prompt "Compare artifacts/baseline-plan.json (the Baseline Plan) against artifacts/remediated-plan.json (the Remediated Plan). Evaluate SEC-001 and SEC-002 using exactly these two plan paths per your own instructions, then respond with ONLY your ReviewResult JSON object."
-      --output artifacts/security-remediated-review-result.json
+    prompt: >-
+      Execute exactly this command and no other command:
+      python3 scripts/run_agent_and_save.py --agent security-reviewer --prompt "Compare artifacts/baseline-plan.json (the Baseline Plan) against artifacts/remediated-plan.json (the Remediated Plan). Evaluate SEC-001 and SEC-002 using exactly these two plan paths per your own instructions, then respond with ONLY your ReviewResult JSON object." --output artifacts/security-remediated-review-result.json
 
   reliability-re-review:
-    agent: reliability-reviewer
+    agent: crew-runner
     description: >-
       Re-invoke the reliability-reviewer agent to judge REL-001/BR-001
       from Baseline vs. Remediated evidence. No dependency on
       security-re-review, so this runs concurrently with it.
     depends_on: [remediated-plan]
     timeout: 300
-    shell: >-
-      python3 scripts/run_agent_and_save.py
-      --agent reliability-reviewer
-      --prompt "Compare artifacts/baseline-plan.json (the Baseline Plan) against artifacts/remediated-plan.json (the Remediated Plan). Evaluate REL-001 and BR-001 using exactly these two plan paths per your own instructions, then respond with ONLY your ReviewResult JSON object."
-      --output artifacts/reliability-remediated-review-result.json
+    prompt: >-
+      Execute exactly this command and no other command:
+      python3 scripts/run_agent_and_save.py --agent reliability-reviewer --prompt "Compare artifacts/baseline-plan.json (the Baseline Plan) against artifacts/remediated-plan.json (the Remediated Plan). Evaluate REL-001 and BR-001 using exactly these two plan paths per your own instructions, then respond with ONLY your ReviewResult JSON object." --output artifacts/reliability-remediated-review-result.json
 
   final-verdict:
-    agent: orchestrator
+    agent: crew-runner
     description: >-
       Produce the authoritative final verdict from the post-remediation
       re-review results only. SAFE_TO_SHIP only if both reviewers PASS —
@@ -103,9 +117,6 @@ agents:
       steering doc's SAFE_TO_SHIP scope-limitation sentence.
     depends_on: [security-re-review, reliability-re-review]
     timeout: 60
-    shell: >-
-      python3 scripts/final_verdict.py
-      --security artifacts/security-remediated-review-result.json
-      --reliability artifacts/reliability-remediated-review-result.json
-      --plan-status success
-      --output artifacts/final-verdict.json
+    prompt: >-
+      Execute exactly this command and no other command:
+      python3 scripts/final_verdict.py --security artifacts/security-remediated-review-result.json --reliability artifacts/reliability-remediated-review-result.json --plan-status success --output artifacts/final-verdict.json

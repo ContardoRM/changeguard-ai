@@ -3,8 +3,24 @@
 
 WHAT THIS SCRIPT DOES, AND WHY IT EXISTS
 -----------------------------------------
-Two confirmed facts about the installed Kiro Crew 0.2.0 runtime shape this
-script:
+Three confirmed facts about the installed Kiro Crew 0.2.0 runtime shape
+this script:
+
+    0. A live semantics probe (see design.md's "Kiro Crew 0.2.0
+       Orchestration Mapping") confirmed `decompose_yaml()` does not treat
+       a node's `prompt:`/`shell:` text as a literal, deterministic
+       subprocess command -- it is folded into `Task.description` and
+       executed as one LLM/ACP chat turn against the run's single
+       per-run agent. This script therefore ALWAYS supplies an explicit
+       `agent` field (`crew-runner` by default) on both the plan and
+       execute calls below, so every ChangeGuard DAG task runs inside the
+       narrow, permission-restricted `crew-runner` Kiro CLI agent
+       (`.kiro/agents/crew-runner.json`) rather than Crew's default
+       `kirocrew-lite` persona. ChangeGuard's safety and reproducibility
+       come from that agent's narrow command allow-list, the deterministic
+       Python transport/tool scripts it is permitted to invoke, and
+       fail-closed artifact validation -- not from any claim that Crew
+       itself executes shell text deterministically.
 
     1. `decompose_yaml()` (`kiro_crew/task_planner.py`) has no
        conditional-skip/branching primitive, and does not accept
@@ -77,6 +93,9 @@ Stage B (remediation onward -- only after Stage A produced
     python3 scripts/changeguard_launch.py \\
         --gateway-url http://127.0.0.1:8787 --stage remediation
 
+Both stages default `--agent` to `crew-runner`; pass a different value
+only for local experimentation, never for a real ChangeGuard run.
+
 Stage A first removes stale run-specific artifacts (never
 `artifacts/baseline-plan.json`) via `cleanup_run_artifacts.py`'s explicit
 allow-list, unless `--skip-cleanup` is passed -- this is what starts a
@@ -111,6 +130,19 @@ DEFAULT_REVIEW_WORKFLOW = ".kiro/crew/changeguard-workflow.yaml"
 DEFAULT_REMEDIATION_WORKFLOW = ".kiro/crew/changeguard-workflow-remediation.yaml"
 DEFAULT_BLOCKED_ARTIFACT = os.path.join("artifacts", "change-blocked-result.json")
 
+# The run-scoped Kiro CLI agent every ChangeGuard DAG task is executed
+# against. Confirmed live (design.md's "Kiro Crew 0.2.0 Orchestration
+# Mapping" / the shell-semantics probe): TaskRunner has exactly one
+# per-run agent (`self._agent`), supplied once via the `agent` field on
+# both `POST /api/taskrunner/plan` and `POST /api/taskrunner/{task_id}/
+# execute` (dashboard/handlers/taskrunner.py::api_taskrunner_plan reads
+# `body.get("agent", "")`; api_taskrunner_execute_plan reads the same
+# field). Every DAG task is an LLM/ACP chat turn against this one agent,
+# never Crew's default `kirocrew-lite` persona -- ChangeGuard must always
+# supply `crew-runner` explicitly on both calls, never rely on the field
+# being omitted.
+CREW_RUNNER_AGENT = "crew-runner"
+
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
@@ -141,6 +173,15 @@ def parse_args(argv=None):
             "-- refuses to run at all unless the blocked artifact exists."
         ),
     )
+    parser.add_argument(
+        "--agent",
+        default=CREW_RUNNER_AGENT,
+        help=(
+            "Run-scoped Kiro CLI agent supplied on both the plan and "
+            "execute calls (default: crew-runner). ChangeGuard must never "
+            "omit this and fall back to Crew's default persona."
+        ),
+    )
     parser.add_argument("--review-workflow", default=DEFAULT_REVIEW_WORKFLOW, help="Path to the Stage A YAML DAG.")
     parser.add_argument("--remediation-workflow", default=DEFAULT_REMEDIATION_WORKFLOW, help="Path to the Stage B YAML DAG.")
     parser.add_argument("--remediation-node", default="remediation", help="Node name/title of the task that must receive force_approval=true.")
@@ -169,13 +210,18 @@ def _http_json(url, method, payload, timeout):
     return json.loads(body) if body else {}
 
 
-def plan_workflow(gateway_url, workflow_path, timeout):
+def plan_workflow(gateway_url, workflow_path, timeout, agent=CREW_RUNNER_AGENT):
     """POST /api/taskrunner/plan with the YAML DAG's text. Decomposes
-    WITHOUT executing. Returns the parsed response body."""
+    WITHOUT executing. Returns the parsed response body.
+
+    Always supplies `agent` explicitly (defaulting to CREW_RUNNER_AGENT)
+    so the run's single per-run agent is the restricted `crew-runner`
+    Kiro CLI agent, never Crew's default `kirocrew-lite` persona.
+    """
     with open(workflow_path, "r") as workflow_file:
         yaml_text = workflow_file.read()
     url = gateway_url.rstrip("/") + "/api/taskrunner/plan"
-    return _http_json(url, "POST", {"source": "yaml", "input": yaml_text}, timeout)
+    return _http_json(url, "POST", {"source": "yaml", "input": yaml_text, "agent": agent}, timeout)
 
 
 def find_task_by_node_name(plan_response, node_name):
@@ -230,17 +276,23 @@ def set_and_verify_force_approval(gateway_url, task_id, task_index, timeout):
     return response
 
 
-def execute_plan(gateway_url, task_id, timeout):
-    """POST /api/taskrunner/{task_id}/execute to start a planned run."""
+def execute_plan(gateway_url, task_id, timeout, agent=CREW_RUNNER_AGENT):
+    """POST /api/taskrunner/{task_id}/execute to start a planned run.
+
+    Always supplies `agent` explicitly (defaulting to CREW_RUNNER_AGENT)
+    -- `api_taskrunner_execute_plan` reads its own `agent` field from the
+    request body independently of what `plan_workflow` submitted, so both
+    calls must agree on `crew-runner`.
+    """
     url = f"{gateway_url.rstrip('/')}/api/taskrunner/{task_id}/execute"
-    return _http_json(url, "POST", {}, timeout)
+    return _http_json(url, "POST", {"agent": agent}, timeout)
 
 
 def run_review_stage(args):
     """Plan and immediately execute Stage A. No approval gate involved --
     Stage A's DAG contains no remediation/force_approval node at all."""
     try:
-        plan_response = plan_workflow(args.gateway_url, args.review_workflow, args.timeout)
+        plan_response = plan_workflow(args.gateway_url, args.review_workflow, args.timeout, agent=args.agent)
     except (OSError, RuntimeError) as exc:
         print(f"changeguard_launch.py: Stage A planning failed: {exc}", file=sys.stderr)
         return 1
@@ -255,7 +307,7 @@ def run_review_stage(args):
         return 1
 
     try:
-        execute_response = execute_plan(args.gateway_url, task_id, args.timeout)
+        execute_response = execute_plan(args.gateway_url, task_id, args.timeout, agent=args.agent)
     except RuntimeError as exc:
         print(f"changeguard_launch.py: Stage A execute failed: {exc}", file=sys.stderr)
         return 1
@@ -284,7 +336,7 @@ def run_remediation_stage(args):
         return 1
 
     try:
-        plan_response = plan_workflow(args.gateway_url, args.remediation_workflow, args.timeout)
+        plan_response = plan_workflow(args.gateway_url, args.remediation_workflow, args.timeout, agent=args.agent)
     except (OSError, RuntimeError) as exc:
         print(f"changeguard_launch.py: Stage B planning failed: {exc}", file=sys.stderr)
         return 1
@@ -311,7 +363,7 @@ def run_remediation_stage(args):
         return 1
 
     try:
-        execute_response = execute_plan(args.gateway_url, task_id, args.timeout)
+        execute_response = execute_plan(args.gateway_url, task_id, args.timeout, agent=args.agent)
     except RuntimeError as exc:
         print(f"changeguard_launch.py: Stage B execute failed: {exc}", file=sys.stderr)
         return 1
