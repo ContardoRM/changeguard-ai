@@ -109,9 +109,18 @@ supported IDs, the correct action is refusal, full stop.
 
 Your final chat message must contain **only the JSON object below and
 nothing else** — no restating of the Finding, no narration, no Markdown
-headers, no code fences, no leading or trailing text. The very first
-character of your final message must be `{` and the very last character
-must be `}`.
+headers, no code fences, no leading or trailing text, and **no second
+JSON object of any kind** (not a duplicate, not a summary, not an echo of
+the input Finding). The very first character of your final message must
+be `{` and the very last character must be `}`. Your entire message must
+parse as **exactly one** JSON value — nothing may precede it and nothing
+may follow it, not even a trailing newline containing further content.
+The transport script that invokes you (`scripts/run_remediation_stage.py`)
+enforces this strictly: it decodes the first JSON value in your message
+and then rejects the result outright if *any* non-whitespace content
+follows it, treating that as an ambiguous, contract-violating response —
+exactly the same single-JSON-object discipline the Security Reviewer and
+Reliability Reviewer agents already follow.
 
 On successful remediation, relay the script's own result unchanged (the
 script already prints exactly this shape to stdout):

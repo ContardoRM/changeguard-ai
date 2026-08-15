@@ -70,23 +70,54 @@ def parse_args(argv=None):
 
 
 def _extract_json_object(stdout_text):
-    """Return the parsed JSON object found in `stdout_text`, or raise ValueError."""
-    stripped = stdout_text.strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError:
-        pass
+    """Return the single, unambiguous JSON object found in `stdout_text`, or
+    raise ValueError.
 
+    Root-cause note (Phase 8B correction, discovered via a real remediated
+    live run): a naive "first `{` to last `}`" span is unsafe when the
+    agent's chat stdout contains more than one brace-delimited block (e.g.
+    the intended result object followed by an incidental second
+    JSON-shaped block, or a restated/echoed fragment). Concatenating
+    everything between the first `{` and the last `}` in that case yields
+    a byte span that is *not* valid JSON on its own -- observed live as
+    `json.JSONDecodeError: Extra data: line 2 column 1`, at the exact
+    offset immediately following a legitimately-valid first object. The
+    old code treated that decode failure as "no JSON found" and let the
+    caller wrap it into a `remediation_failed` result entry, but
+    `run_remediation_stage.py`'s `main()` still returned exit 0
+    unconditionally regardless of that failure, so a Crew DAG node
+    treated this as success and the workflow proceeded (the actual
+    fail-open bug this correction closes -- see `main()`'s new exit-code
+    behavior below).
+
+    This function is corrected to require the extracted candidate span to
+    contain EXACTLY one top-level JSON value: it decodes greedily from the
+    first `{` using `json.JSONDecoder.raw_decode`, then verifies nothing
+    but whitespace follows that one decoded value. If any additional
+    non-whitespace content follows (a second JSON object, echoed text,
+    anything), this is treated as an ambiguous/malformed response and
+    rejected -- never silently truncated to "whichever came first."
+    """
+    stripped = stdout_text.strip()
     first_brace = stripped.find("{")
-    last_brace = stripped.rfind("}")
-    if first_brace == -1 or last_brace == -1 or last_brace < first_brace:
+    if first_brace == -1:
         raise ValueError("no JSON object found in agent stdout")
 
-    candidate = stripped[first_brace : last_brace + 1]
+    decoder = json.JSONDecoder()
     try:
-        return json.loads(candidate)
+        value, end_index = decoder.raw_decode(stripped, first_brace)
     except json.JSONDecodeError as exc:
         raise ValueError(f"agent stdout did not contain valid JSON: {exc}") from exc
+
+    trailing = stripped[end_index:].strip()
+    if trailing:
+        raise ValueError(
+            "agent stdout contained more than one JSON value (ambiguous "
+            f"result); rejecting rather than guessing. Trailing content "
+            f"after the first valid JSON object: {trailing[:200]!r}"
+        )
+
+    return value
 
 
 def _invoke_remediator(finding, terraform_dir, timeout):
@@ -208,7 +239,19 @@ def main(argv=None):
     result = run_remediation_stage(args.blocked_input, args.terraform_dir, args.timeout)
     _atomic_write(result, args.output)
     print(json.dumps({"status": result["status"], "output": args.output}))
-    return 0
+
+    # Fail-closed exit code (Phase 8B correction): "skipped" (nothing
+    # approved to remediate -- the SAFE_TO_SHIP-without-remediation path)
+    # and "remediated" (every approved finding succeeded) are the only
+    # two outcomes that may exit 0. "noop" (empty findings list on a
+    # CHANGE_BLOCKED input -- should not normally occur, but is not a
+    # success either), "partial", and "failed" all exit non-zero, so a
+    # Crew DAG node treats this task itself as FAILED rather than PASSED
+    # -- Crew's own dependency-failure propagation then blocks
+    # `remediated-plan`/the re-review nodes from ever running on a truly
+    # failed remediation, independent of (not instead of) the
+    # final_verdict.py-level check below.
+    return 0 if result["status"] in ("skipped", "remediated") else 1
 
 
 if __name__ == "__main__":

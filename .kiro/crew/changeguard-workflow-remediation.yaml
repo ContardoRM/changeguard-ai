@@ -35,11 +35,30 @@
 # Data flow (fixed artifact paths, same file-based mechanism as Stage A):
 #
 #   artifacts/change-blocked-result.json                 (read by remediation; produced by Stage A)
-#   artifacts/remediation-result.json                    <- remediation
+#   artifacts/remediation-result.json                    <- remediation; ALSO read by final-verdict
+#                                                            (Phase 8B fail-closed correction: SAFE_TO_SHIP
+#                                                            requires this file's status == "remediated")
 #   artifacts/remediated-plan.json                       <- remediated-plan
 #   artifacts/security-remediated-review-result.json     <- security-re-review
 #   artifacts/reliability-remediated-review-result.json  <- reliability-re-review
 #   artifacts/final-verdict.json  (authoritative)        <- final-verdict
+#
+# FAIL-CLOSED NOTE (Phase 8B correction, discovered via a real live
+# approved-remediation run): a remediation may cause a genuine Terraform
+# source mutation via apply_remediation.py BEFORE the remediator agent's
+# own chat-response JSON contract fails to parse (e.g. extra trailing
+# content after the intended result object). When that happens,
+# ChangeGuard's `run_remediation_stage.py` now exits non-zero (so Crew's
+# own DAG failure propagation blocks `remediated-plan`/the re-review
+# nodes from running at all), and `final_verdict.py` independently
+# requires `remediation-result.json` to report status == "remediated"
+# before it will ever consider SAFE_TO_SHIP — so even if this node is
+# somehow reached anyway, the workflow reports REMEDIATION_FAILED, never
+# SAFE_TO_SHIP, on a remediation whose own agent-output contract failed.
+# ChangeGuard does NOT automatically roll back a mutation that happened
+# before a contract failure was detected — no rollback mechanism exists
+# in the approved design — the invariant enforced here is narrower and
+# unconditional: contract failure blocks SAFE_TO_SHIP, always.
 #
 # SAFETY: same fixed, non-interpolated command policy as Stage A — never
 # terraform apply/destroy, never an AWS CLI call, never rm -rf, and never
@@ -108,15 +127,18 @@ agents:
     agent: crew-runner
     description: >-
       Produce the authoritative final verdict from the post-remediation
-      re-review results only. SAFE_TO_SHIP only if both reviewers PASS —
-      reaching this node at all already structurally guarantees
-      remediated-plan succeeded, since Crew's own DAG failure propagation
-      (a failed task blocks its dependents) would have stopped the run
-      before this node runs otherwise; --plan-status success reflects
-      that structural guarantee rather than re-deriving it. Includes the
+      re-review results AND the remediation stage's own result artifact.
+      SAFE_TO_SHIP only if artifacts/remediation-result.json reports
+      status == "remediated" (checked first, independently of plan
+      status or either reviewer — Phase 8B fail-closed correction: a real
+      live run showed a failed/malformed remediation-result.json can
+      coexist with an already-mutated, PASS/PASS-reviewed Terraform
+      state, so that agreement alone is not proof of a successful,
+      contract-compliant remediation), the remediated Terraform plan
+      generation succeeded, AND both reviewers PASS. Includes the
       steering doc's SAFE_TO_SHIP scope-limitation sentence.
-    depends_on: [security-re-review, reliability-re-review]
+    depends_on: [security-re-review, reliability-re-review, remediation]
     timeout: 60
     prompt: >-
       Execute exactly this command and no other command:
-      python3 scripts/final_verdict.py --security artifacts/security-remediated-review-result.json --reliability artifacts/reliability-remediated-review-result.json --plan-status success --output artifacts/final-verdict.json
+      python3 scripts/final_verdict.py --security artifacts/security-remediated-review-result.json --reliability artifacts/reliability-remediated-review-result.json --plan-status success --remediation-result artifacts/remediation-result.json --output artifacts/final-verdict.json

@@ -52,7 +52,7 @@ class PlanAndExecuteSupplyCrewRunnerAgentTestCase(unittest.TestCase):
     def test_plan_workflow_defaults_agent_field_to_crew_runner(self):
         captured = {}
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             captured["payload"] = payload
             return {"task_id": "t1", "steps": []}
 
@@ -64,7 +64,7 @@ class PlanAndExecuteSupplyCrewRunnerAgentTestCase(unittest.TestCase):
     def test_execute_plan_defaults_agent_field_to_crew_runner(self):
         captured = {}
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             captured["payload"] = payload
             return {"ok": True}
 
@@ -76,7 +76,7 @@ class PlanAndExecuteSupplyCrewRunnerAgentTestCase(unittest.TestCase):
     def test_stage_a_plan_and_execute_both_supply_crew_runner_agent(self):
         seen_agents = []
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             if isinstance(payload, dict) and "agent" in payload:
                 seen_agents.append(payload["agent"])
             if url.endswith("/api/taskrunner/plan"):
@@ -142,7 +142,8 @@ class SetAndVerifyForceApprovalTestCase(unittest.TestCase):
             response = changeguard_launch.set_and_verify_force_approval("http://gw", "task1", 2, 30.0)
         self.assertTrue(response["force_approval"])
         mocked.assert_called_once_with(
-            "http://gw/api/taskrunner/task1/tasks/2", "PATCH", {"force_approval": True}, 30.0
+            "http://gw/api/taskrunner/task1/tasks/2", "PATCH", {"force_approval": True}, 30.0,
+            internal_secret="",
         )
 
     def test_verification_failure_raises_and_does_not_confirm(self):
@@ -214,7 +215,7 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
         }
         call_order = []
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             call_order.append((method, url))
             if method == "POST" and url.endswith("/api/taskrunner/plan"):
                 return plan_response
@@ -245,7 +246,7 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
             "steps": [{"index": 1, "description": "remediation: gated node"}],
         }
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             if method == "POST" and url.endswith("/api/taskrunner/plan"):
                 return plan_response
             if method == "PATCH":
@@ -268,7 +269,7 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
         }
         seen_agents = []
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             if isinstance(payload, dict) and "agent" in payload:
                 seen_agents.append(payload["agent"])
             if method == "POST" and url.endswith("/api/taskrunner/plan"):
@@ -292,7 +293,7 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
 
         plan_response = {"task_id": "task-42", "steps": [{"index": 1, "description": "candidate-plan: no match here"}]}
 
-        def fake_http_json(url, method, payload, timeout):
+        def fake_http_json(url, method, payload, timeout, **kwargs):
             if method == "POST" and url.endswith("/api/taskrunner/plan"):
                 return plan_response
             raise AssertionError(f"must not reach PATCH/execute: {method} {url}")

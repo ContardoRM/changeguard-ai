@@ -188,18 +188,49 @@ def parse_args(argv=None):
     parser.add_argument("--blocked-artifact", default=DEFAULT_BLOCKED_ARTIFACT, help="Path checked to decide whether Stage B may run at all.")
     parser.add_argument("--artifacts-dir", default="artifacts", help="Directory cleaned of stale run-specific artifacts before planning.")
     parser.add_argument("--skip-cleanup", action="store_true", help="Skip the stale-artifact cleanup step (for tests/dry-runs only).")
+    parser.add_argument(
+        "--workspace-dir",
+        default="",
+        help=(
+            "Absolute path Crew's TaskRunner should use as this run's "
+            "work_dir/cwd (passed through to both the plan and execute "
+            "calls' 'workspace_dir' field). Required for safely pointing "
+            "a live run at a disposable temporary copy of this repo "
+            "instead of wherever the gateway process happens to be "
+            "running from. Left empty (Crew's own default) if omitted."
+        ),
+    )
+    parser.add_argument(
+        "--internal-secret",
+        default="",
+        help=(
+            "Gateway's X-Internal-Secret value (its own machine-to-"
+            "machine auth token, e.g. the contents of "
+            "~/.kiro/crew/.local_secret) sent on every request. Leave "
+            "empty only if the gateway does not require it."
+        ),
+    )
     parser.add_argument("--timeout", type=float, default=30.0, help="HTTP request timeout in seconds.")
     return parser.parse_args(argv)
 
 
-def _http_json(url, method, payload, timeout):
+def _http_json(url, method, payload, timeout, internal_secret=""):
     """Perform one HTTP request with a JSON body and return the parsed JSON
     response. Raises RuntimeError (never a bare urllib exception) on any
-    connection/HTTP failure, with the URL and underlying error included."""
+    connection/HTTP failure, with the URL and underlying error included.
+
+    `internal_secret`, when non-empty, is sent as the `X-Internal-Secret`
+    header -- the gateway's own machine-to-machine auth mechanism for its
+    "mixed" API paths (dashboard/browser session OR internal secret).
+    Purely a transport/auth detail of reaching the already-documented
+    REST endpoints; it changes no endpoint, no request sequence, and no
+    field name discussed elsewhere in this module.
+    """
     data = json.dumps(payload).encode("utf-8") if payload is not None else None
-    request = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method=method
-    )
+    headers = {"Content-Type": "application/json"}
+    if internal_secret:
+        headers["X-Internal-Secret"] = internal_secret
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             body = response.read()
@@ -210,18 +241,26 @@ def _http_json(url, method, payload, timeout):
     return json.loads(body) if body else {}
 
 
-def plan_workflow(gateway_url, workflow_path, timeout, agent=CREW_RUNNER_AGENT):
+def plan_workflow(gateway_url, workflow_path, timeout, agent=CREW_RUNNER_AGENT, workspace_dir="", internal_secret=""):
     """POST /api/taskrunner/plan with the YAML DAG's text. Decomposes
     WITHOUT executing. Returns the parsed response body.
 
     Always supplies `agent` explicitly (defaulting to CREW_RUNNER_AGENT)
     so the run's single per-run agent is the restricted `crew-runner`
     Kiro CLI agent, never Crew's default `kirocrew-lite` persona.
+    `workspace_dir`, when non-empty, is passed through to
+    `TaskRunner.plan()`'s own `workspace_dir` parameter (confirmed in
+    `api_taskrunner_plan`: `body.get("workspace_dir", "")`), so a live
+    verification run can be pointed at a disposable temporary copy of
+    this repo instead of wherever the gateway process's own cwd is.
     """
     with open(workflow_path, "r") as workflow_file:
         yaml_text = workflow_file.read()
     url = gateway_url.rstrip("/") + "/api/taskrunner/plan"
-    return _http_json(url, "POST", {"source": "yaml", "input": yaml_text, "agent": agent}, timeout)
+    payload = {"source": "yaml", "input": yaml_text, "agent": agent}
+    if workspace_dir:
+        payload["workspace_dir"] = workspace_dir
+    return _http_json(url, "POST", payload, timeout, internal_secret=internal_secret)
 
 
 def find_task_by_node_name(plan_response, node_name):
@@ -256,7 +295,7 @@ def find_task_by_node_name(plan_response, node_name):
     return index
 
 
-def set_and_verify_force_approval(gateway_url, task_id, task_index, timeout):
+def set_and_verify_force_approval(gateway_url, task_id, task_index, timeout, internal_secret=""):
     """PATCH /api/taskrunner/{task_id}/tasks/{index} to set
     force_approval=true, then verify the response reflects that value.
 
@@ -267,7 +306,7 @@ def set_and_verify_force_approval(gateway_url, task_id, task_index, timeout):
     call execute.
     """
     url = f"{gateway_url.rstrip('/')}/api/taskrunner/{task_id}/tasks/{task_index}"
-    response = _http_json(url, "PATCH", {"force_approval": True}, timeout)
+    response = _http_json(url, "PATCH", {"force_approval": True}, timeout, internal_secret=internal_secret)
     if response.get("force_approval") is not True:
         raise RuntimeError(
             f"force_approval update did not verify: expected "
@@ -276,23 +315,31 @@ def set_and_verify_force_approval(gateway_url, task_id, task_index, timeout):
     return response
 
 
-def execute_plan(gateway_url, task_id, timeout, agent=CREW_RUNNER_AGENT):
+def execute_plan(gateway_url, task_id, timeout, agent=CREW_RUNNER_AGENT, workspace_dir="", internal_secret=""):
     """POST /api/taskrunner/{task_id}/execute to start a planned run.
 
     Always supplies `agent` explicitly (defaulting to CREW_RUNNER_AGENT)
     -- `api_taskrunner_execute_plan` reads its own `agent` field from the
     request body independently of what `plan_workflow` submitted, so both
-    calls must agree on `crew-runner`.
+    calls must agree on `crew-runner`. `workspace_dir` mirrors
+    `plan_workflow`'s parameter for the same reason.
     """
     url = f"{gateway_url.rstrip('/')}/api/taskrunner/{task_id}/execute"
-    return _http_json(url, "POST", {"agent": agent}, timeout)
+    payload = {"agent": agent}
+    if workspace_dir:
+        payload["workspace_dir"] = workspace_dir
+    return _http_json(url, "POST", payload, timeout, internal_secret=internal_secret)
 
 
 def run_review_stage(args):
     """Plan and immediately execute Stage A. No approval gate involved --
     Stage A's DAG contains no remediation/force_approval node at all."""
     try:
-        plan_response = plan_workflow(args.gateway_url, args.review_workflow, args.timeout, agent=args.agent)
+        plan_response = plan_workflow(
+            args.gateway_url, args.review_workflow, args.timeout,
+            agent=args.agent, workspace_dir=args.workspace_dir,
+            internal_secret=args.internal_secret,
+        )
     except (OSError, RuntimeError) as exc:
         print(f"changeguard_launch.py: Stage A planning failed: {exc}", file=sys.stderr)
         return 1
@@ -307,7 +354,11 @@ def run_review_stage(args):
         return 1
 
     try:
-        execute_response = execute_plan(args.gateway_url, task_id, args.timeout, agent=args.agent)
+        execute_response = execute_plan(
+            args.gateway_url, task_id, args.timeout,
+            agent=args.agent, workspace_dir=args.workspace_dir,
+            internal_secret=args.internal_secret,
+        )
     except RuntimeError as exc:
         print(f"changeguard_launch.py: Stage A execute failed: {exc}", file=sys.stderr)
         return 1
@@ -336,7 +387,11 @@ def run_remediation_stage(args):
         return 1
 
     try:
-        plan_response = plan_workflow(args.gateway_url, args.remediation_workflow, args.timeout, agent=args.agent)
+        plan_response = plan_workflow(
+            args.gateway_url, args.remediation_workflow, args.timeout,
+            agent=args.agent, workspace_dir=args.workspace_dir,
+            internal_secret=args.internal_secret,
+        )
     except (OSError, RuntimeError) as exc:
         print(f"changeguard_launch.py: Stage B planning failed: {exc}", file=sys.stderr)
         return 1
@@ -357,13 +412,20 @@ def run_remediation_stage(args):
         return 1
 
     try:
-        update_response = set_and_verify_force_approval(args.gateway_url, task_id, task_index, args.timeout)
+        update_response = set_and_verify_force_approval(
+            args.gateway_url, task_id, task_index, args.timeout,
+            internal_secret=args.internal_secret,
+        )
     except RuntimeError as exc:
         print(f"changeguard_launch.py: force_approval update/verification failed: {exc}", file=sys.stderr)
         return 1
 
     try:
-        execute_response = execute_plan(args.gateway_url, task_id, args.timeout, agent=args.agent)
+        execute_response = execute_plan(
+            args.gateway_url, task_id, args.timeout,
+            agent=args.agent, workspace_dir=args.workspace_dir,
+            internal_secret=args.internal_secret,
+        )
     except RuntimeError as exc:
         print(f"changeguard_launch.py: Stage B execute failed: {exc}", file=sys.stderr)
         return 1
