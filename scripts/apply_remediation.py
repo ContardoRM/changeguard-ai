@@ -18,14 +18,36 @@ CLI contract (design.md "Remediation Script"):
         --terraform-dir <path> \
         --rule-id <SEC-001|SEC-002|REL-001|BR-001> \
         --resource <address> \
-        --restore-value <value>
+        --restore-value <value> \
+        [--result-file <path>]
 
-Only `--terraform-dir`, `--rule-id`, `--resource`, and `--restore-value` are
-accepted. There is no argument that accepts arbitrary file paths outside
-`--terraform-dir` (the target file is always `<terraform-dir>/main.tf`, a
-fixed filename this script chooses, never a path supplied by the caller),
-arbitrary HCL content, arbitrary replacement expressions, shell commands, or
-free-form remediation instructions.
+Only `--terraform-dir`, `--rule-id`, `--resource`, `--restore-value`, and the
+optional `--result-file` are accepted. There is no argument that accepts
+arbitrary file paths outside `--terraform-dir`/`--result-file` (the
+Terraform target file is always `<terraform-dir>/main.tf`, a fixed filename
+this script chooses, never a path supplied by the caller), arbitrary HCL
+content, arbitrary replacement expressions, shell commands, or free-form
+remediation instructions.
+
+`--result-file` (Phase 8B transport correction; design.md "Kiro Crew 0.2.0
+Orchestration Mapping"): a caller-supplied, per-invocation path this script
+writes its own structured execution result to, atomically, ONLY on a fully
+successful, validated mutation. This exists because a live investigation
+confirmed `kiro-cli` chat stdout is not a reliable machine-readable
+transport for the Remediator agent's result — that same stdout stream
+simultaneously carries human-readable narration, the underlying shell
+tool's own stdout (this script's own `print(json.dumps(...))` line,
+echoed back by the CLI's tool-output rendering), Kiro's progress/credits
+UI text, and the final assistant response, so more than one JSON-shaped
+fragment can legitimately appear in one chat transcript. `--result-file`
+gives the caller (`scripts/run_remediation_stage.py`) a deterministic,
+unambiguous execution artifact to validate directly, independently of
+whatever the agent's chat stdout happens to contain. When `--result-file`
+is omitted, behavior is unchanged from before this correction (stdout-only,
+for backward compatibility / direct CLI use). This script still performs
+no SEC-001/SEC-002/REL-001/BR-001 policy judgment — `--result-file`
+records mechanical execution evidence (what was mechanically changed),
+never a policy decision about whether that change was warranted.
 
 Supported rule IDs and their fixed resource/attribute bindings:
 
@@ -131,6 +153,15 @@ def parse_args(argv=None):
         "--restore-value",
         required=True,
         help="The approved baseline value to restore (from Finding.baseline_value).",
+    )
+    parser.add_argument(
+        "--result-file",
+        default=None,
+        help=(
+            "Optional path to atomically write this invocation's structured "
+            "execution result to, ONLY on full success. Never written on "
+            "any failure path. See module docstring for why this exists."
+        ),
     )
     return parser.parse_args(argv)
 
@@ -348,6 +379,102 @@ def _parse_single_cidr(inner_text):
         ) from exc
 
 
+# ---------------------------------------------------------------------------
+# --result-file path confinement (Phase 8C hardening)
+#
+# The `--result-file` mechanism (Phase 8B transport correction, see module
+# docstring) originally accepted any caller-supplied path and this script
+# would `os.remove()` and then atomically write to it with no confinement
+# check at all. Combined with the Remediator agent's existing broad shell
+# allow-list entry `python3 scripts/apply_remediation.py *`, an
+# unrestricted path (e.g. a value under system `/tmp`, or worse, an
+# arbitrary path anywhere on disk via `../` traversal or a symlink) meant a
+# maliciously crafted `--result-file` argument could in principle be used
+# to delete or overwrite a file this script has no business touching. This
+# script performs no SEC/REL/BR policy judgment, but it MUST still be
+# incapable of touching anything outside its own narrow, fixed contract --
+# exactly the same "no fallback, no guessing" posture already applied to
+# `--rule-id`/`--resource`/`--restore-value` above, extended to
+# `--result-file`.
+#
+# The fix: `--result-file` must resolve to a path strictly inside the
+# `artifacts/` directory associated with `--terraform-dir` (its sibling
+# directory -- the same repository-root-relative convention already used
+# by `scripts/cleanup_run_artifacts.py`'s own `--artifacts-dir` default and
+# `scripts/changeguard_launch.py`'s own default, and the convention
+# `scripts/run_remediation_stage.py` now generates paths under), and its
+# filename must match the fixed `.remediation-execution-<id>.json` pattern
+# that only `run_remediation_stage.py` generates (see its
+# `_make_result_file_path`) -- the Remediator agent never invents this
+# path itself, it only ever passes through the exact path it was given
+# (`.kiro/agents/remediator-prompt.md`). Validation happens BEFORE any
+# filesystem side effect (before the stale-artifact `os.remove()`, before
+# the success-path `_atomic_write_json()`) and resolves the path with
+# `os.path.realpath` first, so `../` traversal and symlink-escape attempts
+# are both defeated by the same check: whatever the path resolves to, it
+# must land inside the resolved real `artifacts/` directory, full stop.
+# Any failure here is fail-closed -- non-zero exit, no delete, no write.
+_RESULT_FILE_NAME_PATTERN = re.compile(r"^\.remediation-execution-[A-Za-z0-9_-]+\.json$")
+
+
+def _resolve_allowed_artifacts_dir(terraform_dir):
+    """Return the resolved, real `artifacts/` directory associated with
+    `terraform_dir`.
+
+    Sibling-directory convention: `artifacts/` lives next to
+    `terraform_dir` (i.e. `dirname(realpath(terraform_dir))/artifacts`).
+    This matches how this script and `scripts/run_remediation_stage.py`
+    are actually invoked in `.kiro/crew/changeguard-workflow-remediation.yaml`
+    (`--terraform-dir terraform` and `artifacts/...` paths, both relative
+    to the same working directory). `os.path.realpath` is used (not just
+    `abspath`) so a symlinked `terraform_dir` cannot be used to smuggle a
+    different, attacker-controlled "artifacts" directory into this
+    computation.
+    """
+    terraform_real = os.path.realpath(terraform_dir)
+    return os.path.realpath(os.path.join(os.path.dirname(terraform_real), "artifacts"))
+
+
+def _validate_result_file_path(result_file, terraform_dir):
+    """Validate `--result-file` is confined to the expected `artifacts/`
+    directory with the expected filename pattern, or raise
+    `RemediationError`.
+
+    Called BEFORE any filesystem side effect involving `result_file`
+    (before the stale-artifact clear, before the success-path write).
+    Resolves `result_file` with `os.path.realpath` so `../` traversal and
+    symlink-escape attempts are resolved to their real, final target
+    before the confinement check runs -- there is no way to pass this
+    check and still land outside `artifacts/`. Returns the resolved real
+    path on success, so callers use one canonical, already-validated path
+    for every subsequent operation rather than re-resolving (and
+    potentially re-following a since-changed symlink) later.
+    """
+    allowed_dir = _resolve_allowed_artifacts_dir(terraform_dir)
+    resolved_path = os.path.realpath(result_file)
+
+    basename = os.path.basename(resolved_path)
+    if not _RESULT_FILE_NAME_PATTERN.fullmatch(basename):
+        raise RemediationError(
+            f"--result-file {result_file!r} does not match the required "
+            f"'.remediation-execution-<id>.json' filename pattern; refusing "
+            f"to touch it."
+        )
+
+    try:
+        common = os.path.commonpath([allowed_dir, resolved_path])
+    except ValueError:
+        common = None
+    if common != allowed_dir or resolved_path == allowed_dir:
+        raise RemediationError(
+            f"--result-file {result_file!r} resolves to {resolved_path!r}, "
+            f"which is not strictly inside the expected artifacts "
+            f"directory {allowed_dir!r}; refusing to touch it."
+        )
+
+    return resolved_path
+
+
 def _require_change_needed(current_value, restore_value, description):
     """Refuse a no-op remediation.
 
@@ -510,9 +637,72 @@ def _atomic_write(path, content):
         raise
 
 
+def _atomic_write_json(path, payload):
+    """Write `payload` as JSON to `path` atomically (temp file + rename).
+
+    Mirrors `_atomic_write`'s guarantee for the Terraform file: no
+    partially written result artifact can ever be observed by a reader
+    that races this write.
+    """
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory, prefix=".apply_remediation_result_", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as tmp_file:
+            json.dump(payload, tmp_file)
+            tmp_file.write("\n")
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def main(argv=None):
     args = parse_args(argv)
     main_tf_path = os.path.join(args.terraform_dir, "main.tf")
+
+    # Path-confinement validation (Phase 8C hardening) runs FIRST, before
+    # any filesystem side effect involving --result-file (including the
+    # stale-artifact clear below): a --result-file argument that is not
+    # strictly confined to the expected artifacts/ directory with the
+    # expected filename pattern is rejected outright, fail-closed, with
+    # no delete and no write ever attempted against it.
+    result_file = None
+    if args.result_file is not None:
+        try:
+            result_file = _validate_result_file_path(args.result_file, args.terraform_dir)
+        except RemediationError as exc:
+            print(f"apply_remediation.py: {exc}", file=sys.stderr)
+            return 1
+
+    # Stale-artifact protection (Phase 8B transport correction): if a
+    # --result-file path is given, this invocation owns that path
+    # completely. Any pre-existing file at that path is removed BEFORE
+    # attempting the remediation, so a failure below can never leave a
+    # prior, unrelated invocation's success artifact in place to be
+    # mistaken for this invocation's outcome. Combined with
+    # run_remediation_stage.py generating a fresh, unique per-invocation
+    # path (never a fixed/reused filename), this makes the artifact
+    # unambiguous: absence or staleness is structurally impossible once
+    # the caller follows that contract. This only ever runs against
+    # `result_file`, the already-validated, confined, resolved path --
+    # never against the raw, unvalidated `args.result_file`.
+    if result_file is not None:
+        try:
+            os.remove(result_file)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(
+                f"apply_remediation.py: could not clear stale --result-file "
+                f"{args.result_file!r}: {exc}",
+                file=sys.stderr,
+            )
+            return 1
 
     try:
         new_content, restore_value = apply_remediation(
@@ -537,16 +727,32 @@ def main(argv=None):
         )
         return 1
 
-    print(
-        json.dumps(
-            {
-                "status": "remediated",
-                "rule_id": args.rule_id,
-                "resource": args.resource,
-                "restored_value": restore_value,
-            }
-        )
-    )
+    result_payload = {
+        "status": "remediated",
+        "rule_id": args.rule_id,
+        "resource": args.resource,
+        "restored_value": restore_value,
+    }
+
+    # The --result-file write happens ONLY after the Terraform mutation
+    # has already succeeded (this line is unreachable on any failure
+    # path above), targets only the already-validated, confined
+    # `result_file` path (never the raw, unvalidated `args.result_file`),
+    # and is itself atomic (temp file + os.replace) so a caller can never
+    # observe a partially written result artifact.
+    if result_file is not None:
+        try:
+            _atomic_write_json(result_file, result_payload)
+        except OSError as exc:
+            print(
+                f"apply_remediation.py: main.tf was mutated successfully, "
+                f"but the result file {args.result_file!r} could not be "
+                f"written: {exc}",
+                file=sys.stderr,
+            )
+            return 1
+
+    print(json.dumps(result_payload))
     return 0
 
 

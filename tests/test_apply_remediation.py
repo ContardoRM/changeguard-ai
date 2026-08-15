@@ -14,6 +14,7 @@ asserts `main.tf` content is byte-for-byte identical before and after the
 rejected call.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -48,19 +49,20 @@ class RemediationTestCase(unittest.TestCase):
         with open(self.main_tf_path) as f:
             return f.read()
 
-    def _run(self, rule_id, resource, restore_value):
-        return apply_remediation.main(
-            [
-                "--terraform-dir",
-                self.tmp_dir,
-                "--rule-id",
-                rule_id,
-                "--resource",
-                resource,
-                "--restore-value",
-                restore_value,
-            ]
-        )
+    def _run(self, rule_id, resource, restore_value, result_file=None):
+        argv = [
+            "--terraform-dir",
+            self.tmp_dir,
+            "--rule-id",
+            rule_id,
+            "--resource",
+            resource,
+            "--restore-value",
+            restore_value,
+        ]
+        if result_file is not None:
+            argv += ["--result-file", result_file]
+        return apply_remediation.main(argv)
 
     def _assert_unchanged(self, before):
         self.assertEqual(
@@ -528,6 +530,245 @@ class OutputContractTests(RemediationTestCase):
         message = json.loads(printed)
         self.assertEqual(
             message,
+            {
+                "status": "remediated",
+                "rule_id": "REL-001",
+                "resource": "aws_ecs_service.payments_api",
+                "restored_value": 3,
+            },
+        )
+
+
+class ResultFileTests(RemediationTestCase):
+    """Phase 8B transport correction: --result-file is written atomically
+    ONLY on a fully successful, validated mutation, and any stale
+    pre-existing file at that path is cleared before the attempt so it can
+    never be mistaken for this invocation's outcome.
+
+    Uses a path conforming to the Phase 8C path-confinement contract
+    (strictly inside the artifacts/ directory sibling to --terraform-dir,
+    named with the required '.remediation-execution-' prefix) so these
+    transport-behavior tests remain valid alongside the newer
+    ResultFilePathConfinementTests, which cover the confinement contract
+    itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.artifacts_dir = os.path.join(os.path.dirname(self.tmp_dir), "artifacts")
+        os.makedirs(self.artifacts_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, self.artifacts_dir, ignore_errors=True)
+
+    def _result_file_path(self):
+        return os.path.join(self.artifacts_dir, ".remediation-execution-test.json")
+
+    def test_successful_remediation_writes_exact_result_file(self):
+        content = self._read_main_tf().replace(
+            "desired_count       = 3", "desired_count       = 1"
+        )
+        self._write_main_tf(content)
+        result_path = self._result_file_path()
+
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=result_path)
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isfile(result_path))
+        with open(result_path) as f:
+            payload = json.load(f)
+        self.assertEqual(
+            payload,
+            {
+                "status": "remediated",
+                "rule_id": "REL-001",
+                "resource": "aws_ecs_service.payments_api",
+                "restored_value": 3,
+            },
+        )
+
+    def test_stale_preexisting_result_file_is_cleared_before_a_failing_attempt(self):
+        # Pre-seed a stale "success" artifact from an unrelated prior
+        # invocation, then run a call that must fail (unsupported rule
+        # ID). The stale file must not survive to be mistaken for this
+        # invocation's outcome.
+        result_path = self._result_file_path()
+        with open(result_path, "w") as f:
+            json.dump(
+                {
+                    "status": "remediated",
+                    "rule_id": "STALE-999",
+                    "resource": "stale.resource",
+                    "restored_value": "stale",
+                },
+                f,
+            )
+
+        before = self._read_main_tf()
+        rc = self._run("NOT-A-RULE", "aws_ecs_service.payments_api", "3", result_file=result_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+        self.assertFalse(
+            os.path.isfile(result_path),
+            "a stale pre-existing result file must be cleared, never left in place, on a failing attempt",
+        )
+
+    def test_failed_remediation_does_not_write_result_file(self):
+        # Unsupported rule ID -- main.tf untouched, and no result file
+        # should ever be written for a call that never reaches the
+        # mutation step.
+        result_path = self._result_file_path()
+        before = self._read_main_tf()
+
+        rc = self._run("NOT-A-RULE", "aws_ecs_service.payments_api", "3", result_file=result_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+        self.assertFalse(os.path.isfile(result_path))
+
+    def test_no_op_remediation_target_already_correct_does_not_write_result_file(self):
+        # desired_count is already 3 (the baseline fixture's own value) --
+        # the no-op guard should refuse before any write, including the
+        # result file.
+        result_path = self._result_file_path()
+        before = self._read_main_tf()
+
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=result_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+        self.assertFalse(os.path.isfile(result_path))
+
+    def test_omitting_result_file_preserves_stdout_only_behavior(self):
+        content = self._read_main_tf().replace(
+            "desired_count       = 3", "desired_count       = 1"
+        )
+        self._write_main_tf(content)
+
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3")
+
+        self.assertEqual(rc, 0)
+
+
+class ResultFilePathConfinementTests(RemediationTestCase):
+    """Phase 8C hardening: --result-file must resolve strictly inside the
+    artifacts/ directory associated with --terraform-dir, and its
+    filename must match the fixed '.remediation-execution-<id>.json'
+    pattern. Any violation must be rejected fail-closed, BEFORE any
+    delete or write is attempted -- including never deleting a
+    pre-existing file outside the allowed directory."""
+
+    def setUp(self):
+        super().setUp()
+        # self.tmp_dir is the fake --terraform-dir. The allowed
+        # artifacts/ directory is its sibling.
+        self.artifacts_dir = os.path.join(os.path.dirname(self.tmp_dir), "artifacts")
+        os.makedirs(self.artifacts_dir, exist_ok=True)
+        self.addCleanup(shutil.rmtree, self.artifacts_dir, ignore_errors=True)
+
+        # A remediable target so a validation-only rejection can be
+        # distinguished from an unrelated remediation failure.
+        content = self._read_main_tf().replace(
+            "desired_count       = 3", "desired_count       = 1"
+        )
+        self._write_main_tf(content)
+
+    def _valid_result_path(self):
+        return os.path.join(self.artifacts_dir, ".remediation-execution-abc123.json")
+
+    def test_valid_internal_path_is_accepted(self):
+        result_path = self._valid_result_path()
+        before = self._read_main_tf()
+        self.assertNotEqual(before, "")
+
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=result_path)
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isfile(result_path))
+        with open(result_path) as f:
+            payload = json.load(f)
+        self.assertEqual(payload["status"], "remediated")
+
+    def test_absolute_path_outside_workspace_is_rejected_with_no_write(self):
+        outside_dir = tempfile.mkdtemp(prefix="outside_workspace_")
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        outside_path = os.path.join(outside_dir, ".remediation-execution-evil.json")
+
+        before = self._read_main_tf()
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=outside_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+        self.assertFalse(os.path.isfile(outside_path))
+
+    def test_traversal_path_escaping_artifacts_dir_is_rejected_with_no_write(self):
+        traversal_path = os.path.join(
+            self.artifacts_dir, "..", "..", "etc", ".remediation-execution-evil.json"
+        )
+        before = self._read_main_tf()
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=traversal_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+
+    def test_arbitrary_filename_inside_artifacts_dir_is_rejected_with_no_write(self):
+        # Correct directory, wrong filename pattern (missing the required
+        # '.remediation-execution-' prefix) -- e.g. an attempt to target
+        # the durable public artifact by name.
+        wrong_name_path = os.path.join(self.artifacts_dir, "remediation-result.json")
+        before = self._read_main_tf()
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=wrong_name_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+
+    def test_rejected_validation_does_not_delete_a_preexisting_external_file(self):
+        # A decoy file sits outside the allowed artifacts/ directory. A
+        # rejected --result-file pointing at it must never be deleted or
+        # overwritten, even though this call also fails main.tf
+        # remediation validation.
+        outside_dir = tempfile.mkdtemp(prefix="decoy_dir_")
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        decoy_path = os.path.join(outside_dir, "important-file.json")
+        with open(decoy_path, "w") as f:
+            json.dump({"do": "not touch me"}, f)
+
+        before = self._read_main_tf()
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=decoy_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+        self.assertTrue(os.path.isfile(decoy_path))
+        with open(decoy_path) as f:
+            self.assertEqual(json.load(f), {"do": "not touch me"})
+
+    def test_symlink_escaping_artifacts_dir_is_rejected_with_no_write(self):
+        outside_dir = tempfile.mkdtemp(prefix="symlink_target_dir_")
+        self.addCleanup(shutil.rmtree, outside_dir, ignore_errors=True)
+        real_outside_target = os.path.join(outside_dir, "real-target.json")
+
+        symlink_path = os.path.join(self.artifacts_dir, ".remediation-execution-link.json")
+        try:
+            os.symlink(real_outside_target, symlink_path)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported on this platform/filesystem")
+        self.addCleanup(lambda: os.path.exists(symlink_path) and os.remove(symlink_path))
+
+        before = self._read_main_tf()
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=symlink_path)
+
+        self.assertNotEqual(rc, 0)
+        self._assert_unchanged(before)
+        self.assertFalse(os.path.exists(real_outside_target))
+
+    def test_normal_valid_remediation_with_new_path_convention_still_succeeds(self):
+        result_path = self._valid_result_path()
+        rc = self._run("REL-001", "aws_ecs_service.payments_api", "3", result_file=result_path)
+        self.assertEqual(rc, 0)
+        content = self._read_main_tf()
+        self.assertIn("desired_count       = 3", content)
+        with open(result_path) as f:
+            payload = json.load(f)
+        self.assertEqual(
+            payload,
             {
                 "status": "remediated",
                 "rule_id": "REL-001",

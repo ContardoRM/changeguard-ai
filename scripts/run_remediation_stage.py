@@ -24,10 +24,12 @@ no severity computation, no remediation decision-making of its own):
        gate, set post-decomposition per design.md's Kiro Crew mapping
        section, before this node is ever allowed to run). For each
        finding whose `rule_id` is one of the four ChangeGuard supports,
-       invoke `kiro-cli chat --agent remediator --no-interactive` with a
-       prompt containing ONLY that Finding's JSON (never raw plan JSON,
-       never the full blocked-result payload). For any finding whose
-       `rule_id` is not supported (including the synthetic
+       generates a fresh, unique per-invocation `--result-file` path (see
+       "Deterministic execution artifact" below) and invokes
+       `kiro-cli chat --agent remediator --no-interactive` with a prompt
+       containing ONLY that Finding's JSON and that exact path (never raw
+       plan JSON, never the full blocked-result payload). For any finding
+       whose `rule_id` is not supported (including the synthetic
        INCOMPLETE/missing-result diagnostic entries `aggregate_review.py`
        can produce, which carry `rule_id: null`), record a `"refused"`
        entry without invoking any agent — this script performs that
@@ -36,6 +38,26 @@ no severity computation, no remediation decision-making of its own):
        own whitelist, as one more layer of the same defense-in-depth
        pattern already used elsewhere in this system.
     3. Atomically write the union of per-finding results to `--output`.
+
+Deterministic execution artifact, not chat stdout, is the authoritative
+per-finding result (Phase 8B transport correction): a direct investigation
+confirmed `kiro-cli` chat stdout is not a reliable machine-readable
+transport — the same stream can carry human-readable narration, the
+underlying `apply_remediation.py` subprocess's own echoed stdout, Kiro's
+progress/completion UI text, and the final assistant response, so more
+than one JSON-shaped fragment can legitimately appear in one transcript
+even when the remediation itself succeeded cleanly. This script now
+generates a fresh, unique `--result-file` path per finding (via
+`tempfile.mkstemp`, so no fixed/reused filename could ever let a stale
+artifact from a different invocation satisfy this one), instructs the
+Remediator to pass that exact path to `apply_remediation.py`, and — after
+the `kiro-cli` process returns — validates that artifact directly and
+independently of the chat stdout: it must exist, parse as JSON, and have
+`status == "remediated"` with `rule_id`, `resource`, and `restored_value`
+matching the approved Finding's `rule_id`, `resource`, and
+`baseline_value` exactly. `_extract_json_object`'s strict single-JSON-value
+parsing of chat stdout is retained for diagnostics/logging only — it is
+no longer the authoritative signal for whether a finding was remediated.
 
 CLI contract:
 
@@ -120,17 +142,127 @@ def _extract_json_object(stdout_text):
     return value
 
 
-def _invoke_remediator(finding, terraform_dir, timeout):
+def _make_result_file_path(terraform_dir):
+    """Generate a fresh, unique per-invocation --result-file path under
+    the `artifacts/` directory associated with `terraform_dir`.
+
+    Phase 8C hardening: this path used to live under the system default
+    `/tmp` directory. That was found to be an unnecessarily broad
+    location -- combined with the Remediator agent's existing shell
+    allow-list entry for `python3 scripts/apply_remediation.py *`, an
+    unconfined `--result-file` path meant a maliciously crafted argument
+    could in principle point `apply_remediation.py`'s delete-then-write
+    logic at an arbitrary filesystem path. The path is now generated
+    strictly inside `artifacts/` (the sibling directory of
+    `terraform_dir`, i.e. `dirname(realpath(terraform_dir))/artifacts` --
+    the same convention `apply_remediation.py`'s own
+    `_resolve_allowed_artifacts_dir` independently re-derives and
+    enforces from its side, and the same convention already used by
+    `scripts/cleanup_run_artifacts.py`'s `--artifacts-dir` default and
+    `scripts/changeguard_launch.py`'s defaults), using the fixed
+    `.remediation-execution-<id>.json` filename prefix/suffix that
+    `apply_remediation.py`'s `_RESULT_FILE_NAME_PATTERN` requires. This
+    function is the sole generator of that path -- the Remediator agent
+    never invents or chooses it, it only ever passes through the exact
+    path given in its prompt (`.kiro/agents/remediator-prompt.md`).
+
+    Uses `tempfile.mkstemp` (with `dir=artifacts_dir` and a matching
+    prefix/suffix) so the path is guaranteed unique and cannot collide
+    with any prior or concurrent invocation's artifact -- a stale result
+    from a different finding/run can never be mistaken for this
+    invocation's outcome. The file itself is immediately removed
+    (mkstemp creates it) so `apply_remediation.py`'s own
+    stale-artifact-clearing logic and atomic write are the only things
+    that ever populate it; this function only reserves the unique path.
+    """
+    terraform_real = os.path.realpath(terraform_dir)
+    artifacts_dir = os.path.realpath(os.path.join(os.path.dirname(terraform_real), "artifacts"))
+    os.makedirs(artifacts_dir, exist_ok=True)
+    fd, path = tempfile.mkstemp(
+        dir=artifacts_dir, prefix=".remediation-execution-", suffix=".json"
+    )
+    os.close(fd)
+    os.remove(path)
+    return path
+
+
+def _validate_execution_artifact(result_file_path, finding):
+    """Validate `apply_remediation.py`'s --result-file artifact directly.
+
+    This is the authoritative success/failure signal for one finding
+    (Phase 8B transport correction) -- independent of, and never inferred
+    from, the Remediator agent's chat stdout or Terraform's resulting
+    state. Returns the parsed, validated payload dict. Raises ValueError
+    (turned into a `remediation_failed` entry by the caller) if the file
+    is missing, unreadable, malformed, or any field does not exactly
+    match the approved Finding's `rule_id`/`resource`/`baseline_value`.
+    """
+    if not os.path.isfile(result_file_path):
+        raise ValueError(
+            f"apply_remediation.py did not produce a --result-file artifact "
+            f"at {result_file_path!r}; remediation cannot be confirmed successful"
+        )
+
+    try:
+        with open(result_file_path, "r") as result_file:
+            payload = json.load(result_file)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"--result-file artifact could not be read as JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise ValueError("--result-file artifact did not contain a JSON object")
+
+    if payload.get("status") != "remediated":
+        raise ValueError(
+            f"--result-file artifact reported status={payload.get('status')!r}, "
+            f"not 'remediated'"
+        )
+
+    expected_rule_id = finding.get("rule_id")
+    if payload.get("rule_id") != expected_rule_id:
+        raise ValueError(
+            f"--result-file artifact rule_id {payload.get('rule_id')!r} does not "
+            f"match the approved Finding's rule_id {expected_rule_id!r}"
+        )
+
+    expected_resource = finding.get("resource")
+    if payload.get("resource") != expected_resource:
+        raise ValueError(
+            f"--result-file artifact resource {payload.get('resource')!r} does not "
+            f"match the approved Finding's resource {expected_resource!r}"
+        )
+
+    expected_restored_value = finding.get("baseline_value")
+    if payload.get("restored_value") != expected_restored_value:
+        raise ValueError(
+            f"--result-file artifact restored_value {payload.get('restored_value')!r} "
+            f"does not match the approved Finding's baseline_value {expected_restored_value!r}"
+        )
+
+    return payload
+
+
+def _invoke_remediator(finding, terraform_dir, timeout, result_file_path):
     """Invoke the remediator agent for exactly one approved Finding.
 
-    Returns the agent's parsed JSON response dict. Raises ValueError or
-    propagates a subprocess error on failure; callers turn that into a
-    `"remediation_failed"` entry rather than crashing the whole stage.
+    The agent's chat stdout is captured and parsed only for diagnostics
+    (see `_extract_json_object`'s docstring) -- it is no longer the
+    authoritative result. The authoritative result comes from validating
+    `result_file_path` (`apply_remediation.py`'s own `--result-file`
+    artifact) directly, via `_validate_execution_artifact`, after the
+    `kiro-cli` process returns.
+
+    Returns the validated execution-artifact payload dict. Raises
+    ValueError or propagates a subprocess error on failure; callers turn
+    that into a `"remediation_failed"` entry rather than crashing the
+    whole stage.
     """
     prompt = (
         f"Terraform directory: {terraform_dir}\n\n"
+        f"Result file: {result_file_path}\n\n"
         "Remediate exactly this already-approved Finding "
-        "(JSON object below, nothing else is approved):\n\n"
+        "(JSON object below, nothing else is approved), passing the exact "
+        "Result file path above as --result-file to apply_remediation.py:\n\n"
         f"{json.dumps(finding)}"
     )
     argv_list = ["kiro-cli", "chat", "--agent", "remediator", "--no-interactive", prompt]
@@ -139,7 +271,15 @@ def _invoke_remediator(finding, terraform_dir, timeout):
         raise ValueError(
             f"remediator invocation exited with code {result.returncode}: {result.stderr.strip()}"
         )
-    return _extract_json_object(result.stdout)
+
+    # Chat stdout is parsed here only so a malformed/ambiguous response is
+    # visible in diagnostics; its outcome does not gate success/failure.
+    try:
+        _extract_json_object(result.stdout)
+    except ValueError:
+        pass
+
+    return _validate_execution_artifact(result_file_path, finding)
 
 
 def run_remediation_stage(blocked_input_path, terraform_dir, timeout):
@@ -177,8 +317,9 @@ def run_remediation_stage(blocked_input_path, terraform_dir, timeout):
             )
             continue
 
+        result_file_path = _make_result_file_path(terraform_dir)
         try:
-            agent_result = _invoke_remediator(finding, terraform_dir, timeout)
+            agent_result = _invoke_remediator(finding, terraform_dir, timeout, result_file_path)
         except (ValueError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
             results.append(
                 {
@@ -189,6 +330,16 @@ def run_remediation_stage(blocked_input_path, terraform_dir, timeout):
                 }
             )
             continue
+        finally:
+            # The unique per-invocation artifact has already been read
+            # and validated (or the finding already recorded as failed);
+            # remove it so it can never be mistaken for a later
+            # invocation's result, even though its unique filename would
+            # already prevent that collision on its own.
+            try:
+                os.remove(result_file_path)
+            except OSError:
+                pass
 
         results.append(agent_result)
 
