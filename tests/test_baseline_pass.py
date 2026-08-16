@@ -71,7 +71,12 @@ FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 BASELINE_REL = "tests/fixtures/baseline_plan.json"
 CANDIDATE_SAFE_REL = "tests/fixtures/candidate_safe.json"
 
-KIRO_CLI = shutil.which("kiro-cli")
+# `CHANGEGUARD_SKIP_LIVE_TESTS=1` (set by `make test`, the fast/deterministic
+# default) forces these live-agent tests to skip even when `kiro-cli` is on
+# PATH, so the fast suite never makes a real, credit-consuming LLM call.
+# `make test-live` runs without that env var set, so kiro-cli's real
+# presence/absence is what gates these tests there.
+KIRO_CLI = None if os.environ.get("CHANGEGUARD_SKIP_LIVE_TESTS") else shutil.which("kiro-cli")
 
 _INVOCATION_TIMEOUT_SECONDS = 120
 

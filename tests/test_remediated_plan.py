@@ -81,7 +81,11 @@ APPLY_REMEDIATION_SCRIPT = os.path.join(REPO_ROOT, "scripts", "apply_remediation
 RUN_TF_PLAN_SCRIPT = os.path.join(REPO_ROOT, "scripts", "run_tf_plan.py")
 
 TERRAFORM_BIN = shutil.which("terraform")
-KIRO_CLI = shutil.which("kiro-cli")
+# `CHANGEGUARD_SKIP_LIVE_TESTS=1` (set by `make test`, the fast/deterministic
+# default) forces the live-agent PASS-verdict tests below to skip even when
+# `kiro-cli` is on PATH, so the fast suite never makes a real,
+# credit-consuming LLM call. `make test-live` runs without that env var set.
+KIRO_CLI = None if os.environ.get("CHANGEGUARD_SKIP_LIVE_TESTS") else shutil.which("kiro-cli")
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 

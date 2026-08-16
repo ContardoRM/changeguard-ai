@@ -253,7 +253,11 @@ class CombinedEvidenceExtractionTests(unittest.TestCase):
 # Layer 2: live-agent judgment (verdict-level) tests
 # ---------------------------------------------------------------------------
 
-_KIRO_CLI_PATH = shutil.which("kiro-cli")
+# `CHANGEGUARD_SKIP_LIVE_TESTS=1` (set by `make test`, the fast/deterministic
+# default) forces the live-agent judgment tests below to skip even when
+# `kiro-cli` is on PATH, so the fast suite never makes a real,
+# credit-consuming LLM call. `make test-live` runs without that env var set.
+_KIRO_CLI_PATH = None if os.environ.get("CHANGEGUARD_SKIP_LIVE_TESTS") else shutil.which("kiro-cli")
 _KIRO_CLI_AVAILABLE = _KIRO_CLI_PATH is not None
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
