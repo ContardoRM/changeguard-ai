@@ -136,6 +136,199 @@ class FindTaskByNodeNameTestCase(unittest.TestCase):
             changeguard_launch.find_task_by_node_name(plan_response, "remediation")
 
 
+class DefaultRemediationNodeSelectorTestCase(unittest.TestCase):
+    """Regression coverage for the live-smoke-test bug: the word
+    'remediation' is NOT a safe default discriminator, because it also
+    appears in the final-verdict task's description (which reads
+    artifacts/remediation-result.json and describes itself as running
+    "post-remediation" re-review). These tests use a decomposed-plan shape
+    that mirrors the real .kiro/crew/changeguard-workflow-remediation.yaml
+    task descriptions (as observed in a live plan response), not a
+    simplified fixture, so a regression in either the default value or in
+    decompose_yaml()'s own wording would be caught here."""
+
+    # Descriptions intentionally mirror the real workflow's decomposed
+    # task text closely enough to reproduce the ambiguity: every task
+    # names an `artifacts/remediation-result.json`-adjacent word somewhere
+    # except the ones that don't invoke run_remediation_stage.py.
+    REMEDIATION_TASK_DESCRIPTION = (
+        "Agent: crew-runner\nTimeout: 600\n\n"
+        "Execute exactly this command and no other command: "
+        "python3 scripts/run_remediation_stage.py "
+        "--blocked-input artifacts/change-blocked-result.json "
+        "--output artifacts/remediation-result.json --terraform-dir terraform"
+    )
+    REMEDIATED_PLAN_TASK_DESCRIPTION = (
+        "Agent: crew-runner\nTimeout: 300\n\n"
+        "Execute exactly this command and no other command: "
+        "python3 scripts/run_tf_plan.py --terraform-dir terraform "
+        "--output artifacts/remediated-plan.json"
+    )
+    SECURITY_RE_REVIEW_TASK_DESCRIPTION = (
+        "Agent: crew-runner\nTimeout: 300\n\n"
+        "Execute exactly this command and no other command: "
+        "python3 scripts/run_agent_and_save.py --agent security-reviewer "
+        '--prompt "Compare artifacts/baseline-plan.json against '
+        'artifacts/remediated-plan.json..." '
+        "--output artifacts/security-remediated-review-result.json"
+    )
+    RELIABILITY_RE_REVIEW_TASK_DESCRIPTION = (
+        "Agent: crew-runner\nTimeout: 300\n\n"
+        "Execute exactly this command and no other command: "
+        "python3 scripts/run_agent_and_save.py --agent reliability-reviewer "
+        '--prompt "Compare artifacts/baseline-plan.json against '
+        'artifacts/remediated-plan.json..." '
+        "--output artifacts/reliability-remediated-review-result.json"
+    )
+    FINAL_VERDICT_TASK_DESCRIPTION = (
+        "Agent: crew-runner\nTimeout: 60\n\n"
+        "Execute exactly this command and no other command: "
+        "python3 scripts/final_verdict.py "
+        "--security artifacts/security-remediated-review-result.json "
+        "--reliability artifacts/reliability-remediated-review-result.json "
+        "--plan-status success "
+        "--remediation-result artifacts/remediation-result.json "
+        "--output artifacts/final-verdict.json"
+    )
+
+    def _full_plan_response(self):
+        return {
+            "task_id": "task-42",
+            "steps": [
+                {"index": 1, "description": self.REMEDIATION_TASK_DESCRIPTION},
+                {"index": 2, "description": self.REMEDIATED_PLAN_TASK_DESCRIPTION},
+                {"index": 3, "description": self.SECURITY_RE_REVIEW_TASK_DESCRIPTION},
+                {"index": 4, "description": self.RELIABILITY_RE_REVIEW_TASK_DESCRIPTION},
+                {"index": 5, "description": self.FINAL_VERDICT_TASK_DESCRIPTION},
+            ],
+        }
+
+    def test_default_selector_constant_is_the_script_name(self):
+        # Locks in the fixed default so a future edit cannot silently
+        # regress it back to the ambiguous "remediation" word without
+        # this test failing.
+        args = changeguard_launch.parse_args(
+            ["--gateway-url", "http://gw", "--stage", "remediation"]
+        )
+        self.assertEqual(args.remediation_node, "run_remediation_stage.py")
+
+    def test_default_selector_matches_only_the_remediation_task(self):
+        """The word 'remediation' alone is ambiguous (matches the gated
+        node AND final-verdict), but the CLI's actual default value
+        ('run_remediation_stage.py') must resolve to exactly the gated
+        remediation task, index 1, and nothing else."""
+        plan_response = self._full_plan_response()
+        index = changeguard_launch.find_task_by_node_name(
+            plan_response, "run_remediation_stage.py"
+        )
+        self.assertEqual(index, 1)
+
+    def test_bare_remediation_word_is_ambiguous_against_the_real_shape(self):
+        """Demonstrates the exact bug found in the live smoke test: matching
+        on the bare word 'remediation' against this realistic decomposed
+        plan is ambiguous (remediation task + final-verdict task both
+        contain it) and must fail closed, never guess."""
+        plan_response = self._full_plan_response()
+        with self.assertRaises(RuntimeError):
+            changeguard_launch.find_task_by_node_name(plan_response, "remediation")
+
+    def test_final_verdict_task_alone_does_not_match_default_selector(self):
+        """The final-verdict task's own description, in isolation, must
+        not match the fixed script-name discriminator -- proving the new
+        default does not merely get lucky when the ambiguous task is
+        present, it is genuinely specific to the remediation task."""
+        plan_response = {
+            "steps": [{"index": 5, "description": self.FINAL_VERDICT_TASK_DESCRIPTION}]
+        }
+        with self.assertRaises(RuntimeError):
+            changeguard_launch.find_task_by_node_name(
+                plan_response, "run_remediation_stage.py"
+            )
+
+    def test_zero_matches_still_fails_closed(self):
+        plan_response = {
+            "steps": [{"index": 2, "description": self.REMEDIATED_PLAN_TASK_DESCRIPTION}]
+        }
+        with self.assertRaises(RuntimeError):
+            changeguard_launch.find_task_by_node_name(
+                plan_response, "run_remediation_stage.py"
+            )
+
+    def test_multiple_matches_of_the_new_selector_still_fail_closed(self):
+        """Even with the more specific discriminator, if some future DAG
+        edit reintroduces ambiguity (e.g. two tasks both naming the
+        script), the function must still refuse to guess -- coverage that
+        the fail-closed behavior is not weakened by narrowing the
+        default string."""
+        plan_response = {
+            "steps": [
+                {"index": 1, "description": self.REMEDIATION_TASK_DESCRIPTION},
+                {
+                    "index": 6,
+                    "description": (
+                        "Agent: crew-runner\nTimeout: 10\n\n"
+                        "Execute exactly this command and no other command: "
+                        "python3 scripts/run_remediation_stage.py --dry-run"
+                    ),
+                },
+            ]
+        }
+        with self.assertRaises(RuntimeError):
+            changeguard_launch.find_task_by_node_name(
+                plan_response, "run_remediation_stage.py"
+            )
+
+    def test_end_to_end_stage_b_applies_force_approval_only_to_remediation_task(self):
+        """Full run_remediation_stage() sequence against the realistic
+        five-task plan: force_approval must be PATCHed to task index 1
+        (the real remediation task) and to no other index, and execute
+        must only be called after that PATCH is verified true."""
+        tmp_dir = tempfile.mkdtemp(prefix="changeguard_launch_default_selector_test_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp_dir, ignore_errors=True))
+        blocked_path = os.path.join(tmp_dir, "change-blocked-result.json")
+        with open(blocked_path, "w") as f:
+            f.write('{"status": "CHANGE_BLOCKED", "findings": []}')
+        workflow_path = os.path.join(tmp_dir, "remediation-workflow.yaml")
+        with open(workflow_path, "w") as f:
+            f.write("agents: {}\n")
+
+        plan_response = self._full_plan_response()
+        patched_indices = []
+        call_order = []
+
+        def fake_http_json(url, method, payload, timeout, **kwargs):
+            call_order.append((method, url))
+            if method == "POST" and url.endswith("/api/taskrunner/plan"):
+                return plan_response
+            if method == "PATCH":
+                # URL shape: .../api/taskrunner/{task_id}/tasks/{index}
+                patched_indices.append(int(url.rstrip("/").split("/")[-1]))
+                return {"force_approval": True}
+            if method == "POST" and url.endswith("/execute"):
+                return {"ok": True}
+            raise AssertionError(f"unexpected call: {method} {url}")
+
+        args = changeguard_launch.parse_args(
+            [
+                "--gateway-url", "http://gw",
+                "--stage", "remediation",
+                "--blocked-artifact", blocked_path,
+                "--remediation-workflow", workflow_path,
+            ]
+        )
+        self.assertEqual(args.remediation_node, "run_remediation_stage.py")
+
+        with mock.patch.object(changeguard_launch, "_http_json", side_effect=fake_http_json):
+            exit_code = changeguard_launch.run_remediation_stage(args)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(patched_indices, [1])  # only the real remediation task, index 1
+        methods_in_order = [entry[0] for entry in call_order]
+        patch_pos = methods_in_order.index("PATCH")
+        execute_pos = next(i for i, (m, u) in enumerate(call_order) if u.endswith("/execute"))
+        self.assertLess(patch_pos, execute_pos)
+
+
 class SetAndVerifyForceApprovalTestCase(unittest.TestCase):
     def test_verified_true_returns_response(self):
         with mock.patch.object(changeguard_launch, "_http_json", return_value={"force_approval": True}) as mocked:
@@ -211,7 +404,15 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
 
         plan_response = {
             "task_id": "task-42",
-            "steps": [{"index": 1, "description": "remediation: gated node"}],
+            "steps": [
+                {
+                    "index": 1,
+                    "description": (
+                        "remediation: gated node -- runs "
+                        "python3 scripts/run_remediation_stage.py"
+                    ),
+                }
+            ],
         }
         call_order = []
 
@@ -265,7 +466,15 @@ class RunRemediationStageGateTestCase(unittest.TestCase):
 
         plan_response = {
             "task_id": "task-42",
-            "steps": [{"index": 1, "description": "remediation: gated node"}],
+            "steps": [
+                {
+                    "index": 1,
+                    "description": (
+                        "remediation: gated node -- runs "
+                        "python3 scripts/run_remediation_stage.py"
+                    ),
+                }
+            ],
         }
         seen_agents = []
 

@@ -184,7 +184,22 @@ def parse_args(argv=None):
     )
     parser.add_argument("--review-workflow", default=DEFAULT_REVIEW_WORKFLOW, help="Path to the Stage A YAML DAG.")
     parser.add_argument("--remediation-workflow", default=DEFAULT_REMEDIATION_WORKFLOW, help="Path to the Stage B YAML DAG.")
-    parser.add_argument("--remediation-node", default="remediation", help="Node name/title of the task that must receive force_approval=true.")
+    parser.add_argument(
+        "--remediation-node",
+        default="run_remediation_stage.py",
+        help=(
+            "Substring matched against each decomposed task's 'description' "
+            "field to locate the one task that must receive "
+            "force_approval=true. Defaults to the remediation task's own "
+            "unique invoked script name ('run_remediation_stage.py') rather "
+            "than the word 'remediation', because 'remediation' also "
+            "appears in the final-verdict task's description (it reads "
+            "artifacts/remediation-result.json) and is therefore "
+            "structurally ambiguous across the Stage B DAG. Pass a "
+            "different value only if the workflow YAML's remediation node "
+            "command changes."
+        ),
+    )
     parser.add_argument("--blocked-artifact", default=DEFAULT_BLOCKED_ARTIFACT, help="Path checked to decide whether Stage B may run at all.")
     parser.add_argument("--artifacts-dir", default="artifacts", help="Directory cleaned of stale run-specific artifacts before planning.")
     parser.add_argument("--skip-cleanup", action="store_true", help="Skip the stale-artifact cleanup step (for tests/dry-runs only).")
@@ -265,10 +280,26 @@ def plan_workflow(gateway_url, workflow_path, timeout, agent=CREW_RUNNER_AGENT, 
 
 def find_task_by_node_name(plan_response, node_name):
     """Locate exactly one decomposed task whose description contains
-    `node_name` (decompose_yaml embeds each node's YAML key into
-    Task.description). Returns that task's `index`. Raises RuntimeError
-    (fail closed) if the response is unusable, if no task matches, or if
-    more than one task matches -- ambiguity is refused, never guessed."""
+    `node_name` (decompose_yaml folds each node's `prompt:`/`shell:` text,
+    which names the exact command that node runs, into `Task.description`).
+    Returns that task's `index`. Raises RuntimeError (fail closed) if the
+    response is unusable, if no task matches, or if more than one task
+    matches -- ambiguity is refused, never guessed; this function never
+    falls back to "first match wins" or to selecting by index alone.
+
+    `node_name` must be a discriminator that is unique to exactly one
+    task's description. The YAML node *key* ("remediation") is NOT a safe
+    default: the `final-verdict` node's own description also contains the
+    substring "remediation" (it reads `artifacts/remediation-result.json`
+    and describes itself as running "post-remediation" re-review), so
+    matching on that word alone is structurally ambiguous in the current
+    Stage B DAG shape, regardless of which specific run produced it. The
+    CLI's default (`run_remediation_stage.py`, the exact script the
+    remediation task's own `prompt:` invokes) is unique because that
+    script name is not referenced anywhere else in the workflow -- the
+    remediated-plan/re-review/final-verdict tasks each invoke their own,
+    differently-named script.
+    """
     steps = plan_response.get("steps")
     if not isinstance(steps, list):
         raise RuntimeError(
