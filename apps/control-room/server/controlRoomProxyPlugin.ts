@@ -62,6 +62,22 @@
  *                                 repository's real artifacts/ directory,
  *                                 resolved relative to this app's own
  *                                 directory)
+ *   CONTROL_ROOM_KIROCREW_HOME    optional. Overrides KIROCREW_HOME ONLY
+ *                                 for the server-side `kirocrew token`
+ *                                 subprocess this plugin shells out to
+ *                                 (see gatewaySession.ts). Required
+ *                                 whenever the target Gateway is running
+ *                                 with a non-default KIROCREW_HOME (e.g.
+ *                                 an isolated/disposable dev instance) --
+ *                                 without it, the CLI resolves against
+ *                                 THIS process's own default home, which
+ *                                 may be the wrong credential store
+ *                                 entirely. Read server-side only; never
+ *                                 exposed via Vite's `define`/env
+ *                                 injection, never serialized into any
+ *                                 `/__control-room/*` response. Left
+ *                                 unset preserves the CLI's normal
+ *                                 default-home resolution.
  */
 
 import type { Plugin, ViteDevServer } from "vite";
@@ -159,6 +175,10 @@ export function createControlRoomProxyPlugin(): Plugin {
     configureServer(server: ViteDevServer) {
       const artifactsDir = resolveArtifactsDir();
       const gatewayUrl = process.env.CONTROL_ROOM_GATEWAY_URL ?? "";
+      // Read server-side only. Never passed to Vite's `define`, never
+      // included in any response this plugin sends to the browser -- see
+      // gatewaySession.ts's GatewaySessionDeps#kirocrewHome doc comment.
+      const kirocrewHome = process.env.CONTROL_ROOM_KIROCREW_HOME || undefined;
 
       // One GatewaySessionManager per dev-server process, reused across
       // every /__control-room/* request (never recreated per-request) so
@@ -169,6 +189,7 @@ export function createControlRoomProxyPlugin(): Plugin {
         ? new GatewaySessionManager(gatewayUrl, {
             execFile: defaultExecFile,
             httpRequest: defaultHttpRequest,
+            kirocrewHome,
           })
         : null;
 
@@ -212,7 +233,14 @@ export function createControlRoomProxyPlugin(): Plugin {
             approvalId,
             action as "approve" | "reject",
           );
-          const httpStatus = result.status === "ok" ? 200 : result.status === "unauthorized" ? 403 : 502;
+          const httpStatus =
+            result.status === "ok"
+              ? 200
+              : result.status === "unauthorized"
+                ? 403
+                : result.status === "session_acquisition_failed"
+                  ? 500
+                  : 502;
           sendJson(res, httpStatus, { ok: result.ok, approvalApiStatus: result.status });
         } catch (error) {
           sendJson(res, 502, { error: error instanceof Error ? error.message : "gateway request failed" });

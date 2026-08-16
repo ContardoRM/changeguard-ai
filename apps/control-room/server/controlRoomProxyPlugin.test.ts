@@ -89,6 +89,34 @@ describe("buildApprovalSnapshotFields", () => {
     expect(fields.pendingApprovalId).toBeUndefined();
   });
 
+  it("never includes a configured KIROCREW_HOME path anywhere in the returned fields", async () => {
+    const configuredHome = "/tmp/changeguard-smoke-2gqyRN-kirocrew-home";
+    const execFile: ExecFileFn = async (_file, _args, _timeoutMs, env) => {
+      // Simulate a successful mint that used the configured home --
+      // proves the value flowed through to the subprocess env, while the
+      // assertions below prove it never flows back out to the browser.
+      expect(env.KIROCREW_HOME).toBe(configuredHome);
+      return `http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`;
+    };
+    const httpRequest: HttpRequestFn = async (url) => {
+      if (url.endsWith("/api/approvals")) {
+        return approvalsHttpResponse({ status: 200, body: JSON.stringify([{ id: "task-gate-1" }]) });
+      }
+      return approvalsHttpResponse({ status: 200, setCookieHeaders: ["mc_token_8787=session-abc"] });
+    };
+    const session = new GatewaySessionManager("http://127.0.0.1:8787", {
+      execFile,
+      httpRequest,
+      kirocrewHome: configuredHome,
+    });
+
+    const fields = await buildApprovalSnapshotFields("http://127.0.0.1:8787", session, httpRequest);
+    const serialized = JSON.stringify(fields);
+
+    expect(serialized).not.toContain(configuredHome);
+    expect(serialized).not.toContain("KIROCREW_HOME");
+  });
+
   it("never includes a token, cookie, or secret value anywhere in the returned fields", async () => {
     const httpRequest: HttpRequestFn = async (url) => {
       if (url.endsWith("/api/approvals")) {

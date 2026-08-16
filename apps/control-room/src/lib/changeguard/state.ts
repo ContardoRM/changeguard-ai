@@ -48,7 +48,13 @@ export interface LiveArtifactBundle {
    * "CONTROL_ROOM_GATEWAY_URL is unset" ("not_configured"). This module
    * must never treat a non-"ok" status as equivalent to "no approval
    * pending" -- see `approvalDecision` below. */
-  approvalApiStatus?: "ok" | "unauthorized" | "unreachable" | "error" | "not_configured";
+  approvalApiStatus?:
+    | "ok"
+    | "unauthorized"
+    | "unreachable"
+    | "session_acquisition_failed"
+    | "error"
+    | "not_configured";
   /** A genuine pending approval observed via the Gateway's approvals
    * endpoint, if any. Never fabricated -- absent unless the proxy actually
    * observed one (and approvalApiStatus was "ok"). */

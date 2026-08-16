@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { fetchPendingApprovalsWithSession, resolveApprovalWithSession } from "./approvalsClient";
-import type { GatewaySessionManager } from "./gatewaySession";
+import { SessionAcquisitionError, type GatewaySessionManager } from "./gatewaySession";
 import type { GatewayHttpResponse, HttpRequestFn } from "./gatewaySession";
 
 /** Minimal fake standing in for GatewaySessionManager -- exposes only the
@@ -31,6 +31,27 @@ function fakeSession(cookieHeaderSequence: string[]): {
     },
     get getCalls() {
       return getCalls;
+    },
+  };
+}
+
+/** A session whose getSessionCookieHeader() always throws
+ * SessionAcquisitionError -- simulating a KIROCREW_HOME mismatch or
+ * other mint/exchange failure the Gateway itself is unaffected by. */
+function fakeFailingSession(): { session: GatewaySessionManager; invalidateCalls: number } {
+  let invalidateCalls = 0;
+  const session = {
+    getSessionCookieHeader: vi.fn(async () => {
+      throw new SessionAcquisitionError("kirocrew token failed: HTTP Error 403: Forbidden");
+    }),
+    invalidate: vi.fn(() => {
+      invalidateCalls += 1;
+    }),
+  } as unknown as GatewaySessionManager;
+  return {
+    session,
+    get invalidateCalls() {
+      return invalidateCalls;
     },
   };
 }
@@ -147,6 +168,28 @@ describe("fetchPendingApprovalsWithSession", () => {
 
     expect(result.status).toBe("error");
   });
+
+  it("reports 'session_acquisition_failed' (distinct from 'unreachable') when the session mint/exchange itself fails", async () => {
+    const { session } = fakeFailingSession();
+    const { fn, calls } = httpSequence([{ status: 200, setCookieHeaders: [], body: "[]" }]);
+
+    const result = await fetchPendingApprovalsWithSession("http://127.0.0.1:8787", session, fn, 5000);
+
+    expect(result.status).toBe("session_acquisition_failed");
+    expect(result.status).not.toBe("unreachable");
+    // The Gateway HTTP call itself is never even reached -- the failure
+    // happens acquiring the session, before any request goes out.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("never fabricates a pending approval on a session-acquisition failure", async () => {
+    const { session } = fakeFailingSession();
+    const { fn } = httpSequence([{ status: 200, setCookieHeaders: [], body: "[]" }]);
+
+    const result = await fetchPendingApprovalsWithSession("http://127.0.0.1:8787", session, fn, 5000);
+
+    expect(result.approvals).toEqual([]);
+  });
 });
 
 describe("resolveApprovalWithSession", () => {
@@ -239,5 +282,24 @@ describe("resolveApprovalWithSession", () => {
 
     expect(result.ok).toBe(false);
     expect(result.status).toBe("unreachable");
+  });
+
+  it("reports 'session_acquisition_failed' (distinct from 'unreachable') when the session mint/exchange itself fails", async () => {
+    const { session } = fakeFailingSession();
+    const { fn, calls } = httpSequence([{ status: 200, setCookieHeaders: [], body: '{"ok":true}' }]);
+
+    const result = await resolveApprovalWithSession(
+      "http://127.0.0.1:8787",
+      session,
+      fn,
+      5000,
+      "task-gate-1",
+      "approve",
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("session_acquisition_failed");
+    expect(result.status).not.toBe("unreachable");
+    expect(calls).toHaveLength(0);
   });
 });

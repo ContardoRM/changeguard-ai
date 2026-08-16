@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   GatewaySessionManager,
+  SessionAcquisitionError,
+  buildExecFileEnv,
   buildMintTokenArgs,
   extractPortFromGatewayUrl,
   parseLinkTokenFromCliOutput,
@@ -73,9 +75,12 @@ describe("parseSessionCookieFromSetCookie", () => {
   });
 });
 
-function fakeExecFile(stdout: string, capturedCalls: Array<{ file: string; args: string[] }>): ExecFileFn {
-  return async (file, args) => {
-    capturedCalls.push({ file, args });
+function fakeExecFile(
+  stdout: string,
+  capturedCalls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }>,
+): ExecFileFn {
+  return async (file, args, _timeoutMs, env) => {
+    capturedCalls.push({ file, args, env });
     return stdout;
   };
 }
@@ -86,7 +91,7 @@ function fakeHttpRequest(response: GatewayHttpResponse): HttpRequestFn {
 
 describe("GatewaySessionManager", () => {
   it("mints a token via a fixed executable + argv array (no shell string)", async () => {
-    const calls: Array<{ file: string; args: string[] }> = [];
+    const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
     const execFile = fakeExecFile(`http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`, calls);
     const httpRequest = fakeHttpRequest({
       status: 200,
@@ -117,7 +122,7 @@ describe("GatewaySessionManager", () => {
   });
 
   it("caches the session cookie server-side across multiple calls (mints only once)", async () => {
-    const mintCalls: Array<{ file: string; args: string[] }> = [];
+    const mintCalls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
     const execFile = fakeExecFile(`http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`, mintCalls);
     const httpRequest = fakeHttpRequest({
       status: 200,
@@ -136,7 +141,7 @@ describe("GatewaySessionManager", () => {
   it("mints a fresh session after invalidate() is called", async () => {
     const mintCalls: Array<{ file: string; args: string[] }> = [];
     let call = 0;
-    const execFile: ExecFileFn = async (file, args) => {
+    const execFile: ExecFileFn = async (file, args, _timeoutMs, _env) => {
       mintCalls.push({ file, args });
       call += 1;
       return `http://localhost:8787?token=${SAMPLE_LINK_TOKEN}${call}\n`;
@@ -182,6 +187,119 @@ describe("GatewaySessionManager", () => {
     });
     const manager = new GatewaySessionManager("http://127.0.0.1:8787", { execFile: execFileSpy, httpRequest });
     await manager.getSessionCookieHeader();
-    expect(execFileSpy).toHaveBeenCalledWith("kirocrew", ["token", "--port", "8787"], expect.any(Number));
+    expect(execFileSpy).toHaveBeenCalledWith(
+      "kirocrew",
+      ["token", "--port", "8787"],
+      expect.any(Number),
+      expect.any(Object),
+    );
+  });
+
+  it("raises SessionAcquisitionError (not a plain reachability failure) when the exchange response has no session cookie", async () => {
+    const execFile = fakeExecFile(`http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`, []);
+    const httpRequest = fakeHttpRequest({ status: 200, setCookieHeaders: [], body: "" });
+
+    const manager = new GatewaySessionManager("http://127.0.0.1:8787", { execFile, httpRequest });
+
+    await expect(manager.getSessionCookieHeader()).rejects.toBeInstanceOf(SessionAcquisitionError);
+  });
+
+  it("raises SessionAcquisitionError when the kirocrew token CLI invocation itself fails", async () => {
+    const execFile: ExecFileFn = async () => {
+      throw new Error("kirocrew token failed: HTTP Error 403: Forbidden");
+    };
+    const httpRequest = fakeHttpRequest({ status: 200, setCookieHeaders: [], body: "" });
+
+    const manager = new GatewaySessionManager("http://127.0.0.1:8787", { execFile, httpRequest });
+
+    await expect(manager.getSessionCookieHeader()).rejects.toBeInstanceOf(SessionAcquisitionError);
+  });
+
+  it("propagates a plain Error (not SessionAcquisitionError) when the token->cookie exchange HTTP call itself fails", async () => {
+    const execFile = fakeExecFile(`http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`, []);
+    const httpRequest: HttpRequestFn = async () => {
+      throw new Error("ECONNREFUSED");
+    };
+
+    const manager = new GatewaySessionManager("http://127.0.0.1:8787", { execFile, httpRequest });
+
+    let caught: unknown;
+    try {
+      await manager.getSessionCookieHeader();
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(SessionAcquisitionError);
+  });
+
+  it("passes CONTROL_ROOM_KIROCREW_HOME through to execFile's env when configured", async () => {
+    const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const execFile = fakeExecFile(`http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`, calls);
+    const httpRequest = fakeHttpRequest({
+      status: 200,
+      setCookieHeaders: ["mc_token_8787=session-abc; HttpOnly"],
+      body: "",
+    });
+
+    const manager = new GatewaySessionManager("http://127.0.0.1:8787", {
+      execFile,
+      httpRequest,
+      kirocrewHome: "/tmp/changeguard-smoke-2gqyRN-kirocrew-home",
+    });
+    await manager.getSessionCookieHeader();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.KIROCREW_HOME).toBe("/tmp/changeguard-smoke-2gqyRN-kirocrew-home");
+  });
+
+  it("does not set KIROCREW_HOME in execFile's env when no override is configured", async () => {
+    const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const execFile = fakeExecFile(`http://localhost:8787?token=${SAMPLE_LINK_TOKEN}\n`, calls);
+    const httpRequest = fakeHttpRequest({
+      status: 200,
+      setCookieHeaders: ["mc_token_8787=session-abc; HttpOnly"],
+      body: "",
+    });
+
+    const manager = new GatewaySessionManager("http://127.0.0.1:8787", { execFile, httpRequest });
+    await manager.getSessionCookieHeader();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].env.KIROCREW_HOME).toBeUndefined();
+  });
+});
+
+describe("buildExecFileEnv", () => {
+  it("overlays KIROCREW_HOME onto a copy of the base environment when configured", () => {
+    const baseEnv = { PATH: "/usr/bin", HOME: "/Users/someone" };
+    const env = buildExecFileEnv("/tmp/isolated-home", baseEnv);
+
+    expect(env.KIROCREW_HOME).toBe("/tmp/isolated-home");
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/Users/someone");
+  });
+
+  it("preserves every existing base-environment value unchanged", () => {
+    const baseEnv = { PATH: "/usr/bin", HOME: "/Users/someone", CUSTOM_VAR: "value123" };
+    const env = buildExecFileEnv("/tmp/isolated-home", baseEnv);
+
+    expect(env.PATH).toBe("/usr/bin");
+    expect(env.HOME).toBe("/Users/someone");
+    expect(env.CUSTOM_VAR).toBe("value123");
+  });
+
+  it("does not add a KIROCREW_HOME key at all when no override is given", () => {
+    const baseEnv = { PATH: "/usr/bin" };
+    const env = buildExecFileEnv(undefined, baseEnv);
+
+    expect("KIROCREW_HOME" in env).toBe(false);
+  });
+
+  it("does not mutate the base environment object passed in", () => {
+    const baseEnv = { PATH: "/usr/bin" };
+    buildExecFileEnv("/tmp/isolated-home", baseEnv);
+
+    expect("KIROCREW_HOME" in baseEnv).toBe(false);
   });
 });

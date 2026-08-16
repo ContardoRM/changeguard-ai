@@ -161,26 +161,59 @@ export const defaultHttpRequest: HttpRequestFn = (url, method, headers, timeoutM
     req.end();
   });
 
+/**
+ * Builds the environment object passed to the `kirocrew token` subprocess.
+ * Starts from the CURRENT process's own environment (so PATH, HOME, etc.
+ * all resolve normally) and overlays `KIROCREW_HOME` ONLY when an explicit
+ * override is provided -- never inferred from the gateway URL, the
+ * filesystem, or any running-process inspection (explicit configuration
+ * only, per this module's own design constraint). When no override is
+ * given, `kirocrew token` keeps using its own normal default home
+ * resolution, identical to this module's pre-existing behavior.
+ */
+export function buildExecFileEnv(
+  kirocrewHome: string | undefined,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  return {
+    ...baseEnv,
+    ...(kirocrewHome ? { KIROCREW_HOME: kirocrewHome } : {}),
+  };
+}
+
 /** Runs `kirocrew token --port <port>` and resolves with its stdout.
  * Fixed executable name and a fixed, array-form argument list -- NEVER a
  * shell string -- so no value derived from configuration or a request can
  * be interpreted as additional shell syntax. Rejects (fail closed) on any
- * non-zero exit, spawn error, or timeout. */
-export type ExecFileFn = (file: string, args: string[], timeoutMs: number) => Promise<string>;
+ * non-zero exit, spawn error, or timeout.
+ *
+ * `env` is passed straight through to `child_process.execFile`'s own
+ * `env` option -- this is the ONLY mechanism used to target a
+ * non-default `KIROCREW_HOME`; the executable name and argv are never
+ * altered based on it. */
+export type ExecFileFn = (
+  file: string,
+  args: string[],
+  timeoutMs: number,
+  env: NodeJS.ProcessEnv,
+) => Promise<string>;
 
-export const defaultExecFile: ExecFileFn = (file, args, timeoutMs) =>
+export const defaultExecFile: ExecFileFn = (file, args, timeoutMs, env) =>
   new Promise((resolve, reject) => {
     execFileCb(
       file,
       args,
-      { timeout: timeoutMs, shell: false },
-      (error, stdout, stderr) => {
+      { timeout: timeoutMs, shell: false, env },
+      (error, stdout, _stderr) => {
         if (error) {
-          reject(
-            new Error(
-              `${file} ${args.join(" ")} failed: ${error.message}${stderr ? ` (stderr: ${stderr.trim()})` : ""}`,
-            ),
-          );
+          // Deliberately do NOT include the subprocess's raw stderr in
+          // this error's message: `kirocrew token`'s own stderr can
+          // reference the resolved KIROCREW_HOME path or other
+          // credential-store details, and this error's message may
+          // eventually be logged. `error.message` (the exec failure
+          // reason/exit code) is diagnostic enough without echoing
+          // subprocess output verbatim.
+          reject(new Error(`${file} ${args.join(" ")} failed: ${error.message}`));
           return;
         }
         resolve(stdout);
@@ -188,11 +221,36 @@ export const defaultExecFile: ExecFileFn = (file, args, timeoutMs) =>
     );
   });
 
+/**
+ * Raised when the server-side mint (`kirocrew token`) or the
+ * token->cookie exchange fails for a reason OTHER than the Gateway being
+ * genuinely unreachable over the network (e.g. a `KIROCREW_HOME`/auth-
+ * context mismatch, a malformed CLI response, or a missing session
+ * cookie in the exchange response). Callers (see `approvalsClient.ts`)
+ * use this distinct error type to report a dedicated
+ * `"session_acquisition_failed"` status instead of folding it into the
+ * generic `"unreachable"` classification used for actual network/
+ * connection failures -- the Gateway may be perfectly reachable while
+ * this module simply cannot obtain a valid dashboard session for it.
+ */
+export class SessionAcquisitionError extends Error {}
+
 export interface GatewaySessionDeps {
   execFile: ExecFileFn;
   httpRequest: HttpRequestFn;
   mintTimeoutMs?: number;
   exchangeTimeoutMs?: number;
+  /** Optional `KIROCREW_HOME` override for the `kirocrew token`
+   * subprocess ONLY -- read server-side from `CONTROL_ROOM_KIROCREW_HOME`
+   * by `controlRoomProxyPlugin.ts`, never exposed to browser code, never
+   * serialized into any `/__control-room/*` response. Required whenever
+   * the target Gateway is running with a non-default `KIROCREW_HOME`
+   * (e.g. an isolated/disposable dev instance) -- without it, `kirocrew
+   * token` resolves against the CALLING process's own default home,
+   * which may be a completely different (or nonexistent, for that
+   * gateway) credential store. Left undefined preserves this module's
+   * original default behavior (no override at all). */
+  kirocrewHome?: string;
 }
 
 /**
@@ -219,14 +277,42 @@ export class GatewaySessionManager {
    * Never called directly by external callers -- routed through
    * `getSessionCookieHeader()` so caching stays centralized. */
   private async mintAndExchange(): Promise<string> {
-    const stdout = await this.deps.execFile(
-      "kirocrew",
-      buildMintTokenArgs(this.port),
-      this.deps.mintTimeoutMs ?? MINT_TOKEN_TIMEOUT_MS,
-    );
-    const linkToken = parseLinkTokenFromCliOutput(stdout);
+    const env = buildExecFileEnv(this.deps.kirocrewHome);
+    let stdout: string;
+    try {
+      stdout = await this.deps.execFile(
+        "kirocrew",
+        buildMintTokenArgs(this.port),
+        this.deps.mintTimeoutMs ?? MINT_TOKEN_TIMEOUT_MS,
+        env,
+      );
+    } catch (error) {
+      // Distinguish "we could not mint/exchange a dashboard session at
+      // all" (e.g. a KIROCREW_HOME/auth-context mismatch, or the CLI
+      // itself failing) from a plain Gateway network-reachability
+      // failure -- see SessionAcquisitionError's own doc comment and
+      // approvalsClient.ts's status classification.
+      throw new SessionAcquisitionError(
+        error instanceof Error ? error.message : "kirocrew token invocation failed",
+      );
+    }
+
+    let linkToken: string;
+    try {
+      linkToken = parseLinkTokenFromCliOutput(stdout);
+    } catch (error) {
+      // A malformed/unexpected CLI output shape is also a session-
+      // acquisition problem, not a network-reachability one.
+      throw new SessionAcquisitionError(
+        error instanceof Error ? error.message : "could not parse kirocrew token output",
+      );
+    }
 
     const exchangeUrl = `${this.gatewayUrl.replace(/\/+$/, "")}/?token=${encodeURIComponent(linkToken)}`;
+    // A failure HERE (connection refused, DNS failure, timeout) genuinely
+    // means the Gateway itself is unreachable -- let it propagate as a
+    // plain Error so callers classify it as "unreachable", not
+    // "session_acquisition_failed".
     const response = await this.deps.httpRequest(
       exchangeUrl,
       "GET",
@@ -236,7 +322,10 @@ export class GatewaySessionManager {
 
     const cookieValue = parseSessionCookieFromSetCookie(response.setCookieHeaders, this.port);
     if (!cookieValue) {
-      throw new Error(
+      // The Gateway responded (it IS reachable) but did not hand back a
+      // usable session cookie -- a session-acquisition problem, not a
+      // reachability one.
+      throw new SessionAcquisitionError(
         "gateway token->cookie exchange did not return an mc_token_" +
           this.port +
           " session cookie; refusing to proceed without a genuine session.",

@@ -15,14 +15,28 @@
  * fabricates a successful result.
  */
 
-import type { GatewaySessionManager } from "./gatewaySession";
-import type { HttpRequestFn } from "./gatewaySession";
+import { SessionAcquisitionError, type GatewaySessionManager, type HttpRequestFn } from "./gatewaySession";
 
 /** Coarse-grained, browser-safe classification of the approvals API's
  * reachability/auth state. Deliberately excludes any credential value --
  * see `controlRoomProxyPlugin.ts`'s snapshot handler for how this is
- * surfaced to the browser. */
-export type ApprovalApiStatus = "ok" | "unauthorized" | "unreachable" | "error";
+ * surfaced to the browser.
+ *
+ * `"session_acquisition_failed"` is distinct from `"unreachable"`: the
+ * Gateway itself may be perfectly reachable while the server-side
+ * `kirocrew token` mint/exchange fails for some OTHER reason (most
+ * commonly a `KIROCREW_HOME` mismatch against an isolated Gateway
+ * instance -- see `gatewaySession.ts`'s `SessionAcquisitionError`).
+ * Collapsing that into `"unreachable"` would misleadingly suggest a
+ * network problem when the actual cause is a session/credential-
+ * acquisition problem the Control Room proxy needs a human to fix
+ * (e.g. by setting `CONTROL_ROOM_KIROCREW_HOME`). */
+export type ApprovalApiStatus =
+  | "ok"
+  | "unauthorized"
+  | "unreachable"
+  | "session_acquisition_failed"
+  | "error";
 
 export interface PendingApproval {
   id: string;
@@ -55,26 +69,28 @@ export async function fetchPendingApprovalsWithSession(
 ): Promise<FetchApprovalsResult> {
   const url = `${gatewayUrl.replace(/\/+$/, "")}/api/approvals`;
 
-  const attempt = async (): Promise<{ httpStatus: number; body: string } | null> => {
+  const attempt = async (): Promise<
+    { httpStatus: number; body: string } | { failure: "unreachable" | "session_acquisition_failed" }
+  > => {
     try {
       const cookieHeader = await session.getSessionCookieHeader();
       const response = await httpRequest(url, "GET", { Cookie: cookieHeader }, timeoutMs);
       return { httpStatus: response.status, body: response.body };
-    } catch {
-      return null;
+    } catch (error) {
+      return { failure: error instanceof SessionAcquisitionError ? "session_acquisition_failed" : "unreachable" };
     }
   };
 
   const first = await attempt();
-  if (first === null) {
-    return { status: "unreachable", approvals: [] };
+  if ("failure" in first) {
+    return { status: first.failure, approvals: [] };
   }
 
   if (isAuthFailure(first.httpStatus)) {
     session.invalidate();
     const second = await attempt();
-    if (second === null) {
-      return { status: "unreachable", approvals: [] };
+    if ("failure" in second) {
+      return { status: second.failure, approvals: [] };
     }
     if (isAuthFailure(second.httpStatus)) {
       return { status: "unauthorized", approvals: [] };
@@ -118,26 +134,28 @@ export async function resolveApprovalWithSession(
 ): Promise<ResolveApprovalResult> {
   const url = `${gatewayUrl.replace(/\/+$/, "")}/api/approvals/${encodeURIComponent(approvalId)}/${action}`;
 
-  const attempt = async (): Promise<{ httpStatus: number } | null> => {
+  const attempt = async (): Promise<
+    { httpStatus: number } | { failure: "unreachable" | "session_acquisition_failed" }
+  > => {
     try {
       const cookieHeader = await session.getSessionCookieHeader();
       const response = await httpRequest(url, "POST", { Cookie: cookieHeader }, timeoutMs);
       return { httpStatus: response.status };
-    } catch {
-      return null;
+    } catch (error) {
+      return { failure: error instanceof SessionAcquisitionError ? "session_acquisition_failed" : "unreachable" };
     }
   };
 
   const first = await attempt();
-  if (first === null) {
-    return { status: "unreachable", ok: false };
+  if ("failure" in first) {
+    return { status: first.failure, ok: false };
   }
 
   if (isAuthFailure(first.httpStatus)) {
     session.invalidate();
     const second = await attempt();
-    if (second === null) {
-      return { status: "unreachable", ok: false };
+    if ("failure" in second) {
+      return { status: second.failure, ok: false };
     }
     if (isAuthFailure(second.httpStatus)) {
       return { status: "unauthorized", ok: false };

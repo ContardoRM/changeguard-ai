@@ -27,9 +27,18 @@ export function isLiveModeEnabled(): boolean {
  * "not_configured" for when CONTROL_ROOM_GATEWAY_URL itself is unset.
  * Distinguishes "no approval is currently pending" ("ok" with no
  * `pendingApprovalId`) from "the approvals API could not be reached or
- * authenticated" ("unauthorized" | "unreachable" | "error") -- the proxy
- * never fabricates `pendingApprovalId` for any status other than "ok". */
-export type ApprovalApiStatus = "ok" | "unauthorized" | "unreachable" | "error" | "not_configured";
+ * authenticated" ("unauthorized" | "unreachable" | "error") and from
+ * "the Gateway is reachable but the Control Room could not obtain a
+ * dashboard session for it" ("session_acquisition_failed" -- e.g. a
+ * CONTROL_ROOM_KIROCREW_HOME mismatch). The proxy never fabricates
+ * `pendingApprovalId` for any status other than "ok". */
+export type ApprovalApiStatus =
+  | "ok"
+  | "unauthorized"
+  | "unreachable"
+  | "session_acquisition_failed"
+  | "error"
+  | "not_configured";
 
 export interface GatewaySnapshot {
   crewReachable: boolean;
