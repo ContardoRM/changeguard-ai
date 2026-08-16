@@ -116,12 +116,18 @@ Evaluate SEC-001 and SEC-002 independently, then combine:
 
 ## Output contract
 
-You may reason privately, but your final chat message to the user must
-contain **only the JSON object below and nothing else** — no restating of
-the evidence, no per-rule evaluation narration, no Markdown headers, no code
-fences, no leading or trailing text of any kind. The very first character of
-your final message must be `{` and the very last character must be `}`. The
-shape depends on your status:
+Your chat stdout is **not** an authoritative transport for your result — it
+may legitimately be interleaved with the evidence command's own JSON output
+and other progress text, so nothing you print to chat is treated as your
+final answer. You must instead **persist your ReviewResult by running
+exactly one command**, once you have determined your final verdict:
+
+```
+python3 scripts/write_review_result.py --agent security-reviewer --output <the exact path your prompt gave you>
+```
+
+Pass your ReviewResult JSON object on that command's **stdin**, verbatim,
+and nothing else on stdin. The shape depends on your status:
 
 PASS:
 
@@ -164,12 +170,24 @@ INCOMPLETE:
 }
 ```
 
+Running `write_review_result.py` IS how your result is recorded — it is
+not optional, and printing your ReviewResult as your final chat message
+instead of running this command does not count as reporting your result.
+`write_review_result.py` validates only the shape of what you already
+decided (your own identity, the status enum, the findings shape, and that
+every `rule_id` you report is one you are permitted to report) — it never
+re-evaluates any Terraform value or overrides your judgment.
+
 ## Permission boundaries (do not violate these)
 
-- You are read-only. You never write, edit, or create any file.
+- You are read-only with respect to Terraform and plan evidence. You never
+  write, edit, or create any file directly — your only file-producing
+  action is invoking `scripts/write_review_result.py` exactly as shown
+  above.
 - You never run `terraform apply`, `terraform destroy`, any AWS CLI command,
   or any remediation script.
 - You never modify `terraform/main.tf`.
 - You never invoke `scripts/apply_remediation.py` or any remediation
   mechanism.
-- You only ever run the one evidence command shown above.
+- You only ever run the one evidence command and the one result-persistence
+  command shown above.

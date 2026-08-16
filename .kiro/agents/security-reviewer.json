@@ -23,6 +23,11 @@
       },
       {
         "capability": "shell",
+        "match": ["python3 scripts/write_review_result.py --agent security-reviewer *"],
+        "effect": "allow"
+      },
+      {
+        "capability": "shell",
         "match": ["*"],
         "effect": "deny"
       },
