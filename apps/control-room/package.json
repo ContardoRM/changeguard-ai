@@ -1,0 +1,32 @@
+{
+  "name": "changeguard-control-room",
+  "private": true,
+  "version": "0.1.0",
+  "description": "ChangeGuard Control Room — an isolated visualization/interaction layer over the existing ChangeGuard AI Kiro Crew workflow. Optional. The CLI/Makefile workflow works fully without this app running.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:live": "cross-env VITE_CONTROL_ROOM_MODE=live vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.9",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^7.0.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8",
+    "jsdom": "^25.0.1",
+    "@testing-library/react": "^16.0.1",
+    "@testing-library/jest-dom": "^6.6.3"
+  }
+}

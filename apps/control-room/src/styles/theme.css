@@ -1,0 +1,962 @@
+/* ChangeGuard Control Room — visual theme.
+ *
+ * "Agent Quest meets DevSecOps Mission Control": a dark mission-control
+ * background, neon-green PASS, red FAIL/CHANGE_BLOCKED, amber Human
+ * Approval Gate, purple Remediator, muted/locked SAFE_TO_SHIP until
+ * valid, glowing-but-restrained borders, and DAG connector lines. This is
+ * an original visual identity for ChangeGuard -- not a copy of any other
+ * project's specific screens/assets.
+ */
+
+:root {
+  --cr-bg: #0a0e17;
+  --cr-bg-panel: #0f1522;
+  --cr-bg-panel-raised: #131b2b;
+  --cr-border: #223049;
+  --cr-border-glow: #2f4266;
+  --cr-text: #dce6f5;
+  --cr-text-dim: #8ea0bd;
+  --cr-text-faint: #566b85;
+
+  --cr-green: #34f5a3;
+  --cr-green-dim: #1c8a5c;
+  --cr-red: #ff5470;
+  --cr-red-dim: #8a2337;
+  --cr-amber: #ffb454;
+  --cr-amber-dim: #8a5c1f;
+  --cr-purple: #b389ff;
+  --cr-purple-dim: #5b3d94;
+  --cr-blue: #58c4ff;
+  --cr-blue-dim: #235a82;
+  --cr-muted: #3a4a63;
+
+  --cr-radius: 10px;
+  --cr-radius-sm: 6px;
+  --cr-shadow-glow: 0 0 0 1px var(--cr-border-glow), 0 0 18px -6px currentColor;
+
+  font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 20% -10%, #142033 0%, var(--cr-bg) 55%);
+  color: var(--cr-text);
+}
+
+.cr-app {
+  min-width: 1080px;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 16px 28px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* Subtle mission-control backdrop: a faint dot grid + soft glows, fixed
+ * behind everything, no animation. */
+body {
+  background-image:
+    radial-gradient(circle at 15% 8%, rgba(88, 196, 255, 0.08), transparent 40%),
+    radial-gradient(circle at 85% 15%, rgba(179, 137, 255, 0.07), transparent 42%),
+    radial-gradient(circle at 50% 95%, rgba(52, 245, 163, 0.05), transparent 45%),
+    radial-gradient(circle, rgba(142, 160, 189, 0.16) 1px, transparent 1px);
+  background-size: auto, auto, auto, 26px 26px;
+  background-position: 0 0, 0 0, 0 0, 0 0;
+  background-attachment: fixed;
+}
+
+/* ---------- Header ---------- */
+
+.cr-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--cr-bg-panel);
+  border: 1px solid var(--cr-border);
+  border-radius: var(--cr-radius);
+}
+
+.cr-header-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cr-header-title h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.cr-header-title p {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--cr-text-dim);
+}
+
+.cr-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.cr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid var(--cr-border);
+  background: var(--cr-bg-panel-raised);
+  color: var(--cr-text-dim);
+  white-space: nowrap;
+}
+
+.cr-chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.cr-chip--live {
+  color: var(--cr-green);
+  border-color: var(--cr-green);
+  background: rgba(52, 245, 163, 0.1);
+  box-shadow: 0 0 12px -4px var(--cr-green);
+}
+.cr-chip--offline {
+  color: var(--cr-text-faint);
+  border-color: var(--cr-border);
+}
+.cr-chip--amber {
+  color: var(--cr-amber);
+  border-color: var(--cr-amber);
+  background: rgba(255, 180, 84, 0.1);
+  box-shadow: 0 0 12px -4px var(--cr-amber);
+}
+.cr-chip--muted {
+  color: var(--cr-text-dim);
+}
+.cr-chip--purple {
+  color: var(--cr-purple);
+  border-color: var(--cr-purple-dim);
+  background: rgba(179, 137, 255, 0.08);
+}
+
+/* ---------- Mode banner ---------- */
+
+.cr-mode-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 16px;
+  border-radius: var(--cr-radius-sm);
+  border: 1px dashed var(--cr-border-glow);
+  background: var(--cr-bg-panel);
+  font-size: 12px;
+  color: var(--cr-text-dim);
+}
+
+.cr-mode-banner strong {
+  color: var(--cr-text);
+}
+
+.cr-fixture-select {
+  background: var(--cr-bg-panel-raised);
+  color: var(--cr-text);
+  border: 1px solid var(--cr-border);
+  border-radius: var(--cr-radius-sm);
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+.cr-fixture-select:focus-visible {
+  outline: 2px solid var(--cr-blue);
+  outline-offset: 2px;
+}
+
+/* ---------- Main DAG row ---------- */
+
+.cr-dag-row {
+  display: grid;
+  grid-template-columns: 1.1fr auto 1fr auto 1fr auto 1fr auto 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.cr-connector {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--cr-muted), transparent);
+  position: relative;
+  min-width: 20px;
+  opacity: 0.6;
+}
+
+.cr-connector::after {
+  content: "▸";
+  position: absolute;
+  right: -6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--cr-muted);
+}
+
+.cr-connector--active {
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--cr-blue), transparent);
+  opacity: 1;
+}
+.cr-connector--active::after {
+  color: var(--cr-blue);
+  text-shadow: 0 0 8px var(--cr-blue);
+  animation: cr-connector-pulse 2s ease-in-out infinite;
+}
+
+@keyframes cr-connector-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cr-connector--active::after {
+    animation: none;
+  }
+}
+
+/* ---------- Panels / cards (shared) ---------- */
+
+.cr-panel {
+  background: var(--cr-bg-panel);
+  border: 1px solid var(--cr-border);
+  border-radius: var(--cr-radius);
+  padding: 12px 14px;
+}
+
+.cr-panel-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cr-text-dim);
+  margin: 0 0 8px;
+}
+
+/* ---------- Candidate change diff ---------- */
+
+.cr-diff-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.cr-diff-panel-head .cr-panel-title {
+  margin: 0;
+}
+
+.cr-scenario-badge {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--cr-purple-dim);
+  color: var(--cr-purple);
+  background: rgba(179, 137, 255, 0.08);
+  white-space: nowrap;
+}
+
+.cr-diff-resource {
+  font-family: "SFMono-Regular", "Fira Code", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--cr-text-dim);
+  margin-bottom: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cr-diff {
+  font-family: "SFMono-Regular", "Fira Code", Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  border-radius: var(--cr-radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--cr-border);
+  background: var(--cr-bg-panel-raised);
+}
+
+.cr-diff-line {
+  display: grid;
+  grid-template-columns: 20px 14px 1fr;
+  align-items: baseline;
+  padding: 3px 10px;
+  gap: 4px;
+}
+
+.cr-diff-lineno {
+  color: var(--cr-text-faint);
+  font-size: 10.5px;
+  text-align: right;
+  user-select: none;
+}
+
+.cr-diff-marker {
+  font-weight: 700;
+  user-select: none;
+}
+
+.cr-diff-code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cr-diff-line--removed {
+  background: rgba(255, 84, 112, 0.1);
+  color: var(--cr-red);
+}
+.cr-diff-line--removed .cr-diff-marker {
+  color: var(--cr-red);
+}
+.cr-diff-line--added {
+  background: rgba(52, 245, 163, 0.1);
+  color: var(--cr-green);
+}
+.cr-diff-line--added .cr-diff-marker {
+  color: var(--cr-green);
+}
+.cr-diff-line--context {
+  color: var(--cr-text-dim);
+}
+.cr-diff-line--context .cr-diff-marker {
+  color: var(--cr-text-faint);
+}
+
+/* ---------- Agent card ---------- */
+
+.cr-agent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  text-align: center;
+  padding: 14px 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Faint identity accent behind each specialized unit's card, keyed off
+ * kind -- a restrained HUD tint, not a full illustration. */
+.cr-agent-card--security::before,
+.cr-agent-card--reliability::before,
+.cr-agent-card--remediator::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.5;
+}
+.cr-agent-card--security::before {
+  background: radial-gradient(circle at 50% -10%, rgba(88, 196, 255, 0.10), transparent 60%);
+}
+.cr-agent-card--reliability::before {
+  background: radial-gradient(circle at 50% -10%, rgba(52, 245, 163, 0.10), transparent 60%);
+}
+.cr-agent-card--remediator::before {
+  background: radial-gradient(circle at 50% -10%, rgba(179, 137, 255, 0.10), transparent 60%);
+}
+
+/* HUD ring: a double-ring "targeting reticle" treatment around each
+ * agent's icon, built from CSS only (no external artwork). */
+.cr-agent-ring {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1;
+}
+
+.cr-agent-ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1px dashed var(--cr-border-glow);
+  opacity: 0.7;
+}
+
+.cr-agent-icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 22px;
+  border: 2px solid var(--cr-border);
+  background: var(--cr-bg-panel-raised);
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+
+.cr-agent-name {
+  font-size: 13px;
+  font-weight: 700;
+  z-index: 1;
+}
+
+.cr-agent-rules {
+  font-size: 10.5px;
+  color: var(--cr-text-dim);
+  z-index: 1;
+}
+
+.cr-agent-findings {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+  z-index: 1;
+}
+
+.cr-state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--cr-border);
+  color: var(--cr-text-dim);
+  z-index: 1;
+}
+
+/* Status light -- a small solid dot next to the status word, so the
+ * state reads as a "signal light" even from a distance during a
+ * screen-share, never relying on color alone (the status word text is
+ * the primary, non-color signal; see accessibility note below). */
+.cr-status-light {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cr-muted);
+  flex-shrink: 0;
+}
+
+/* State color mapping, applied via data-state attribute */
+[data-state="IDLE"] .cr-state-badge,
+[data-state="STANDBY"] .cr-state-badge {
+  color: var(--cr-text-dim);
+}
+[data-state="REVIEWING"] .cr-agent-icon,
+[data-state="REMEDIATING"] .cr-agent-icon,
+[data-state="WAITING_FOR_APPROVAL"] .cr-agent-icon {
+  border-color: var(--cr-blue-dim);
+  box-shadow: 0 0 16px -4px var(--cr-blue);
+}
+[data-state="REVIEWING"] .cr-agent-ring::before {
+  border-color: var(--cr-blue);
+  animation: cr-scan-ring 1.8s linear infinite;
+}
+[data-state="REVIEWING"] .cr-state-badge,
+[data-state="REMEDIATING"] .cr-state-badge {
+  color: var(--cr-blue);
+  border-color: var(--cr-blue-dim);
+}
+[data-state="REVIEWING"] .cr-status-light,
+[data-state="REMEDIATING"] .cr-status-light {
+  background: var(--cr-blue);
+  box-shadow: 0 0 6px 1px var(--cr-blue);
+}
+[data-state="PASS"] .cr-agent-icon,
+[data-state="COMPLETE"] .cr-agent-icon {
+  border-color: var(--cr-green-dim);
+  box-shadow: 0 0 22px -3px var(--cr-green);
+}
+[data-state="PASS"] .cr-state-badge,
+[data-state="COMPLETE"] .cr-state-badge {
+  color: var(--cr-green);
+  border-color: var(--cr-green-dim);
+}
+[data-state="PASS"] .cr-status-light,
+[data-state="COMPLETE"] .cr-status-light {
+  background: var(--cr-green);
+  box-shadow: 0 0 8px 2px var(--cr-green);
+}
+[data-state="FAIL"] .cr-agent-icon,
+[data-state="FAILED"] .cr-agent-icon {
+  border-color: var(--cr-red-dim);
+  box-shadow: 0 0 22px -3px var(--cr-red);
+}
+[data-state="FAIL"] .cr-state-badge,
+[data-state="FAILED"] .cr-state-badge {
+  color: var(--cr-red);
+  border-color: var(--cr-red-dim);
+}
+[data-state="FAIL"] .cr-status-light,
+[data-state="FAILED"] .cr-status-light {
+  background: var(--cr-red);
+  box-shadow: 0 0 8px 2px var(--cr-red);
+}
+[data-state="INCOMPLETE"] .cr-agent-icon {
+  border-color: var(--cr-amber-dim);
+  box-shadow: 0 0 16px -4px var(--cr-amber);
+}
+[data-state="INCOMPLETE"] .cr-state-badge {
+  color: var(--cr-amber);
+  border-color: var(--cr-amber-dim);
+}
+[data-state="INCOMPLETE"] .cr-status-light {
+  background: var(--cr-amber);
+  box-shadow: 0 0 6px 1px var(--cr-amber);
+}
+[data-state="WAITING_FOR_APPROVAL"] .cr-state-badge {
+  color: var(--cr-amber);
+  border-color: var(--cr-amber-dim);
+}
+[data-state="WAITING_FOR_APPROVAL"] .cr-status-light {
+  background: var(--cr-amber);
+  box-shadow: 0 0 6px 1px var(--cr-amber);
+}
+
+@keyframes cr-scan-ring {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-state="REVIEWING"] .cr-agent-ring::before {
+    animation: none;
+  }
+}
+
+.cr-agent-card--security .cr-agent-icon {
+  color: var(--cr-blue);
+}
+.cr-agent-card--reliability .cr-agent-icon {
+  color: var(--cr-green);
+}
+.cr-agent-card--remediator .cr-agent-icon {
+  color: var(--cr-purple);
+  border-color: var(--cr-purple-dim);
+}
+
+.cr-finding-tag {
+  font-size: 10.5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--cr-red-dim);
+  color: var(--cr-red);
+  background: rgba(255, 84, 112, 0.08);
+}
+
+/* ---------- Change Blocked banner ---------- */
+
+.cr-blocked-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 18px;
+  border-radius: var(--cr-radius);
+  border: 1px solid var(--cr-red-dim);
+  background: rgba(255, 84, 112, 0.08);
+  color: var(--cr-red);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- Approval gate ---------- */
+
+.cr-gate {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border-radius: var(--cr-radius);
+  border: 1px solid var(--cr-amber-dim);
+  background: rgba(255, 180, 84, 0.06);
+  transition: box-shadow 300ms ease, padding 200ms ease;
+}
+
+/* When a genuine (or fixture) approval is pending, the gate becomes the
+ * visual centerpiece of the whole screen: larger, brighter border glow,
+ * more breathing room -- unmistakable during a screen-share. */
+.cr-gate--pending {
+  padding: 22px;
+  border-color: var(--cr-amber);
+  box-shadow: 0 0 0 1px rgba(255, 180, 84, 0.35), 0 0 36px -8px var(--cr-amber);
+}
+
+.cr-gate-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  border: 2px solid var(--cr-amber-dim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 28px;
+  color: var(--cr-amber);
+  box-shadow: 0 0 24px -6px var(--cr-amber);
+}
+
+.cr-gate--pending .cr-gate-icon {
+  width: 76px;
+  height: 76px;
+  font-size: 32px;
+  border-color: var(--cr-amber);
+  box-shadow: 0 0 32px -4px var(--cr-amber);
+}
+
+.cr-gate-title {
+  font-weight: 800;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  color: var(--cr-amber);
+}
+
+.cr-gate-subtitle {
+  margin: -4px 0 0;
+  font-size: 12px;
+  color: var(--cr-text-dim);
+  text-align: center;
+}
+
+.cr-gate-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.cr-btn {
+  padding: 9px 22px;
+  border-radius: var(--cr-radius-sm);
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  border: 1px solid var(--cr-border);
+  cursor: pointer;
+  background: var(--cr-bg-panel-raised);
+  color: var(--cr-text);
+  transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+.cr-btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+.cr-btn:focus-visible {
+  outline: 2px solid var(--cr-blue);
+  outline-offset: 2px;
+}
+.cr-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  filter: grayscale(0.4);
+}
+.cr-btn--approve {
+  border-color: var(--cr-green-dim);
+  color: var(--cr-green);
+}
+.cr-btn--approve:hover:not(:disabled) {
+  box-shadow: 0 0 16px -4px var(--cr-green);
+}
+.cr-btn--reject {
+  border-color: var(--cr-red-dim);
+  color: var(--cr-red);
+}
+.cr-btn--reject:hover:not(:disabled) {
+  box-shadow: 0 0 16px -4px var(--cr-red);
+}
+/* "Armed" = live mode with a genuine pending approval actually present.
+ * Only then do the buttons carry a resting glow -- otherwise (fixture
+ * mode, or live mode with no real pending approval yet) they stay flat
+ * and disabled, so a demo can never be mistaken for a live decision. */
+.cr-btn--armed.cr-btn--approve {
+  box-shadow: 0 0 14px -3px var(--cr-green);
+}
+.cr-btn--armed.cr-btn--reject {
+  box-shadow: 0 0 14px -3px var(--cr-red);
+}
+
+.cr-gate-readonly-note {
+  font-size: 11.5px;
+  color: var(--cr-text-dim);
+  text-align: center;
+  max-width: 320px;
+}
+
+/* ---------- SAFE_TO_SHIP card ---------- */
+
+.cr-verdict {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 16px;
+  border-radius: var(--cr-radius);
+  border: 1px solid var(--cr-muted);
+  background: var(--cr-bg-panel);
+  color: var(--cr-text-dim);
+  text-align: center;
+}
+
+.cr-verdict--safe {
+  border-color: var(--cr-green-dim);
+  background: rgba(52, 245, 163, 0.07);
+  color: var(--cr-green);
+}
+
+.cr-verdict--blocked {
+  border-color: var(--cr-red-dim);
+  background: rgba(255, 84, 112, 0.07);
+  color: var(--cr-red);
+}
+
+.cr-verdict-title {
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.cr-verdict-note {
+  font-size: 11.5px;
+  color: var(--cr-text-dim);
+  max-width: 420px;
+}
+
+/* ---------- Bottom panel grid ---------- */
+
+/* Bottom diagnostic panels are intentionally lower-weight than the main
+ * DAG/approval/verdict flow above: smaller title text (set on
+ * .cr-panel-title above), tighter row spacing, and a capped max-height
+ * with internal scrolling so they never compete with, or push down, the
+ * primary mission flow on a standard demo screen. */
+.cr-bottom-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+
+.cr-bottom-grid .cr-panel {
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+}
+
+.cr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.cr-finding-row {
+  padding: 6px 9px;
+  border-radius: var(--cr-radius-sm);
+  border: 1px solid var(--cr-red-dim);
+  background: rgba(255, 84, 112, 0.06);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.cr-finding-row-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.cr-finding-row-reason {
+  color: var(--cr-text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Fixed two-column grid: filename column flexes and truncates, status
+ * column has a reserved fixed width so long filenames can never collide
+ * with "present"/"not yet". */
+.cr-artifact-row {
+  display: grid;
+  grid-template-columns: 1fr 58px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: var(--cr-radius-sm);
+  font-size: 11.5px;
+}
+
+.cr-artifact-row--exists {
+  color: var(--cr-text);
+}
+.cr-artifact-row--missing {
+  color: var(--cr-text-dim);
+  opacity: 0.55;
+}
+
+.cr-artifact-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.cr-artifact-name-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.cr-artifact-status {
+  text-align: right;
+  white-space: nowrap;
+  font-size: 10.5px;
+  color: var(--cr-text-dim);
+}
+
+.cr-artifact-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  flex-shrink: 0;
+  display: inline-block;
+  background: var(--cr-muted);
+}
+.cr-artifact-row--exists .cr-artifact-dot {
+  background: var(--cr-green);
+}
+
+.cr-activity-row {
+  display: grid;
+  grid-template-columns: 52px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 11.5px;
+  color: var(--cr-text-dim);
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+.cr-activity-row:last-child {
+  border-bottom: none;
+}
+.cr-activity-row time {
+  font-size: 10px;
+  color: var(--cr-muted);
+  white-space: nowrap;
+}
+.cr-activity-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cr-rule-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: var(--cr-radius-sm);
+  font-size: 12px;
+}
+
+.cr-severity {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+.cr-severity--critical {
+  color: var(--cr-red);
+  border: 1px solid var(--cr-red-dim);
+}
+.cr-severity--high {
+  color: var(--cr-amber);
+  border: 1px solid var(--cr-amber-dim);
+}
+
+.cr-footer-note {
+  grid-column: 1 / -1;
+  text-align: center;
+  font-size: 11px;
+  color: var(--cr-text-dim);
+  padding-top: 4px;
+}
+
+/* ---------- Accessibility ---------- */
+
+/* Global keyboard-focus fallback: every focusable element gets a
+ * visible, high-contrast outline, even if a more specific rule above
+ * doesn't apply. Never relies on color alone -- outline + offset is
+ * shape-based. */
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--cr-blue);
+  outline-offset: 2px;
+}
+
+/* ---------- Reduced motion ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+@media (min-width: 1px) {
+  .cr-agent-icon,
+  .cr-gate-icon {
+    animation: cr-pulse 2.6s ease-in-out infinite;
+  }
+}
+
+@keyframes cr-pulse {
+  0%,
+  100% {
+    filter: brightness(1);
+  }
+  50% {
+    filter: brightness(1.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cr-agent-icon,
+  .cr-gate-icon {
+    animation: none;
+  }
+}
