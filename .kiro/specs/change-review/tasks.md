@@ -222,11 +222,12 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - `test`: run the full `unittest` suite under `tests/`
     - _Requirements: 13.1_
 
-- [ ] 18. Write the README judge instructions
-  - [ ] 18.1 Add the five-minute demo walkthrough to `README.md`
+- [x] 18. Write the README judge instructions
+  - [x] 18.1 Add the five-minute demo walkthrough to `README.md`
     - Document the steps from design.md's "Five-Minute Demo Walkthrough": clone, generate baseline, inject one supported change, run the ChangeGuard workflow via Kiro Crew, observe `CHANGE_BLOCKED` findings, approve remediation, observe the remediated plan and final verdict — and the alternate rejection branch showing `REMEDIATION_REJECTED`
     - State plainly that `SAFE_TO_SHIP` reflects only the four supported MVP rules and is not a claim of universal production-readiness (Requirement 10.8)
     - _Requirements: 10.8, 13.1, 13.2_
+    - Implemented: `README.md` was rewritten for a judge audience with "5-minute demo" (exact `make setup` / `make baseline` / `make demo-rel`/`make demo-sec` / `changeguard_launch.py --stage review` / `--stage remediation` / Gateway approval / `artifacts/final-verdict.json` / `make reset` sequence, verified against the current Makefile and scripts), a "What you should see" section covering all three verified outcomes (safe PASS+PASS, approved CHANGE_BLOCKED→remediation→SAFE_TO_SHIP, rejected CHANGE_BLOCKED→REMEDIATION_REJECTED with no mutation), and a "Safety model" section stating verbatim that `SAFE_TO_SHIP` covers only the four supported rules and is not a universal production-readiness certification.
 
   > Tasks 17.1 and 18.1 depend only on the CLI contracts fixed in Tasks 1-2 (flags, artifact paths) and are independent of every agent/hook implementation detail in Tasks 8-11; they can proceed in parallel with each other and with Tasks 8-16 once Tasks 1-2 are complete.
 
