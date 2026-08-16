@@ -7,3 +7,9 @@ artifacts/*.json
 __pycache__/
 *.pyc
 .DS_Store
+
+# Kiro Crew writes this checkpoint file at the repository root when a live
+# Crew run uses this repository itself as its working directory. It is
+# ephemeral run state (elapsed time, token counts, per-run task titles),
+# not intentional project documentation -- never commit it.
+/TASK_PROGRESS.md

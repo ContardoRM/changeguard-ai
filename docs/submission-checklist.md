@@ -11,8 +11,7 @@
 - [x] No secrets committed — the only credential-shaped string in the repo is the fixed demo fixture's fake `password = "changeguard-demo-password"` in `terraform/main.tf` (and its mirrored test fixtures), never a real AWS key or token.
 - [x] No temporary live-run artifacts committed — `artifacts/*.json` is gitignored except `artifacts/.gitkeep`; `terraform/.terraform/` and `*.tfstate*`/`*.tfplan` are gitignored.
 - [x] No Terraform source diff from the safe baseline (`git diff -- terraform/main.tf` is empty).
-
-**Known stray file to review before submitting:** `TASK_PROGRESS.md` at the repository root is a Kiro Crew checkpoint file that gets written when a live Crew run uses this repository as its working directory — it is not part of ChangeGuard's own reviewed artifact set and is currently tracked in git. Decide whether to remove it or add it to `.gitignore` before submitting; it was intentionally left untouched here rather than deleted automatically, since it is a tracked file, not one of ChangeGuard's own generated/cleanup-covered artifacts.
+- [x] `TASK_PROGRESS.md` (an ephemeral Kiro Crew checkpoint file previously captured by a live Crew run using this repository as its working directory) has been removed from version control and is now covered by a narrow `/TASK_PROGRESS.md` `.gitignore` entry, so it cannot be recommitted accidentally.
 
 ## Judge quick-start
 
