@@ -169,6 +169,90 @@ export async function buildApprovalSnapshotFields(
   return { crewReachable, approvalApiStatus: status, pendingApprovalId: approvals[0]?.id };
 }
 
+export interface ApprovalRoute {
+  approvalId: string;
+  action: "approve" | "reject";
+}
+
+/**
+ * Parses the RELATIVE URL Vite's Connect-based dev-server middleware
+ * stack passes to a handler mounted via
+ * `server.middlewares.use("/__control-room/approvals/", handler)`.
+ *
+ * BUG THIS FIXES (confirmed via a live smoke test): Connect strips the
+ * matched mount-path prefix from `req.url` before invoking a mounted
+ * handler -- standard Connect/Express middleware-mounting semantics, the
+ * same behavior `app.use("/api", router)` relies on. So inside this
+ * handler, `req.url` for a browser request to
+ * `/__control-room/approvals/<id>/<action>` is the REMAINDER after that
+ * prefix has already been consumed (e.g. `"<id>/<action>"`, possibly with
+ * a leading slash depending on Connect's own normalization) -- never the
+ * original full request path. The previous implementation anchored its
+ * regex on the FULL mounted path (`^/__control-room/approvals/...`),
+ * which can therefore never match the already-stripped `req.url`, so
+ * every approve/reject call fell through to this handler's own 404
+ * branch, unconditionally.
+ *
+ * This function accepts ONLY the relative forms -- `"<id>/<action>"` or
+ * `"/<id>/<action>"` -- and deliberately does NOT require (or attempt to
+ * also support) the full `/__control-room/approvals/...` prefix; the
+ * browser-side caller (`src/lib/changeguard/gateway.ts#resolveApproval`)
+ * is unchanged and keeps requesting the full path -- Connect's own mount
+ * matching is what strips it before this function ever sees it.
+ *
+ * Fails closed (returns `null`) for anything that is not EXACTLY
+ * `<approval-id>/<approve|reject>`:
+ *   - an empty/absent URL;
+ *   - a missing id or action segment;
+ *   - more than two path segments (extra segments after the action, or
+ *     the id itself containing an unencoded `/`);
+ *   - an action other than exactly `"approve"` or `"reject"`;
+ *   - a `%2F`-style encoded slash hidden inside either raw segment,
+ *     checked BEFORE percent-decoding -- decoding first would let an
+ *     encoded slash resurrect additional path structure and smuggle a
+ *     value past the two-segment check (the classic encoded-slash /
+ *     path-traversal-ambiguity class of bug);
+ *   - a malformed percent-encoding `decodeURIComponent` itself rejects;
+ *   - a decoded id containing `/` or `..`.
+ *
+ * A query string or fragment on `req.url`, if present, is ignored (this
+ * handler only ever cares about the path).
+ */
+export function parseApprovalRoute(url: string | undefined): ApprovalRoute | null {
+  if (!url) return null;
+
+  const pathOnly = url.split(/[?#]/, 1)[0] ?? "";
+  if (pathOnly.length === 0) return null;
+
+  const withoutLeadingSlash = pathOnly.startsWith("/") ? pathOnly.slice(1) : pathOnly;
+  if (withoutLeadingSlash.length === 0) return null;
+
+  const segments = withoutLeadingSlash.split("/");
+  if (segments.length !== 2) return null; // exactly <id>/<action>, never more or fewer
+
+  const [rawId, rawAction] = segments;
+  if (!rawId || !rawAction) return null;
+
+  // Reject an encoded slash in either raw segment BEFORE decoding -- see
+  // this function's own doc comment for why decode-then-check would be
+  // unsafe here.
+  if (/%2f/i.test(rawId) || /%2f/i.test(rawAction)) return null;
+
+  let approvalId: string;
+  let action: string;
+  try {
+    approvalId = decodeURIComponent(rawId);
+    action = decodeURIComponent(rawAction);
+  } catch {
+    return null; // malformed percent-encoding
+  }
+
+  if (!approvalId || approvalId.includes("/") || approvalId.includes("..")) return null;
+  if (action !== "approve" && action !== "reject") return null;
+
+  return { approvalId, action };
+}
+
 export function createControlRoomProxyPlugin(): Plugin {
   return {
     name: "changeguard-control-room-proxy",
@@ -210,9 +294,12 @@ export function createControlRoomProxyPlugin(): Plugin {
       });
 
       server.middlewares.use("/__control-room/approvals/", async (req, res) => {
-        // Matches /__control-room/approvals/{id}/{approve|reject}
-        const match = /^\/__control-room\/approvals\/([^/]+)\/(approve|reject)$/.exec(req.url ?? "");
-        if (!match || req.method !== "POST") {
+        // req.url here is RELATIVE to this mount path (Connect strips the
+        // "/__control-room/approvals/" prefix before invoking this
+        // handler) -- see parseApprovalRoute()'s own doc comment for the
+        // full explanation and the bug this fixes.
+        const route = parseApprovalRoute(req.url);
+        if (!route || req.method !== "POST") {
           sendJson(res, 404, { error: "not found" });
           return;
         }
@@ -223,7 +310,7 @@ export function createControlRoomProxyPlugin(): Plugin {
           });
           return;
         }
-        const [, approvalId, action] = match;
+        const { approvalId, action } = route;
         try {
           const result = await resolveApprovalWithSession(
             gatewayUrl,
@@ -231,7 +318,7 @@ export function createControlRoomProxyPlugin(): Plugin {
             defaultHttpRequest,
             APPROVALS_HTTP_TIMEOUT_MS,
             approvalId,
-            action as "approve" | "reject",
+            action,
           );
           const httpStatus =
             result.status === "ok"
