@@ -75,11 +75,11 @@ python3 scripts/changeguard_launch.py \
   --stage remediation
 ```
 
-Show the genuine pending approval in the Gateway dashboard.
+Show the genuine pending approval — either in the Gateway dashboard, or in the Control Room UI (`cd apps/control-room && npm install && CONTROL_ROOM_GATEWAY_URL=http://127.0.0.1:8787 npm run dev:live`, then open `http://localhost:5173`; it renders `HUMAN APPROVAL REQUIRED` from the same real pending approval).
 
 > "ChangeGuard cannot mutate Terraform until a human approves this remediation."
 
-Pause visibly before approving. Approve the request in the dashboard.
+Pause visibly before approving. Approve the request — in the dashboard, or by clicking Approve in the Control Room.
 
 ## 3:15–4:15 — Remediation and re-review
 
@@ -147,6 +147,16 @@ make reset
 
 Restores `terraform/main.tf` to the safe baseline and removes only the run-generated artifacts — `artifacts/baseline-plan.json` is preserved and reusable for the next run, per the current Makefile's `reset` target.
 
+## If a judge doesn't want to run the live Crew Gateway
+
+The full live workflow (Gateway + Stage A/B + approval) requires `kirocrew`/`kiro-cli` installed and configured. If that's not feasible in the room:
+
+```bash
+make test
+```
+
+The deterministic test suite (286 tests) exercises every rule's evidence extraction, remediation, and aggregation logic against real Terraform plan JSON, without a live Gateway or `kiro-cli` call. This demonstrates the architecture and rule logic faithfully, but it is **not** a substitute for a genuine live approval — do not present a test run as if a human approval gate was exercised live. Say so explicitly if you fall back to this path.
+
 ## Presenter warnings
 
 - Never run `terraform apply` — this demo only ever plans.
@@ -155,3 +165,4 @@ Restores `terraform/main.tf` to the safe baseline and removes only the run-gener
 - Prefer the REL-001 scenario (`make demo-rel`) for the main demo — the `desired_count` change is the most visually obvious.
 - If the live agents are slow, narrate what's happening rather than restarting the run.
 - Never claim `SAFE_TO_SHIP` is a universal security certification — it covers only the four supported MVP rules.
+- Never present a deterministic test run as a live human approval — if the live Gateway isn't available, say so.

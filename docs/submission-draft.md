@@ -18,6 +18,8 @@ Kiro is not a side tool here — it's the core mechanism:
 - **Kiro Crew's** YAML DAG drives real dependency-based scheduling, dispatching the two reviewer pairs concurrently.
 - The **Kiro Crew Gateway's `force_approval`** mechanism is the genuine human-approval gate remediation cannot bypass.
 - Every agent operates inside an explicit Kiro permission/safety boundary: narrow shell allow-lists, a `preToolUse` hook blocking `terraform apply`/`destroy`/AWS CLI/destructive filesystem commands, and no agent holding a generic file-write tool.
+- This whole system was built via **Kiro's spec-driven workflow** — `requirements.md` → `design.md` → `tasks.md` under `.kiro/specs/change-review/` — with every implementation decision traceable back to an approved requirement.
+- Two real, load-bearing Kiro Crew/`kiro-cli` runtime constraints were discovered live during implementation and had to be engineered around, not assumed away: a DAG node's `shell:`/`prompt:` text executes as an LLM/agent chat turn, not a literal deterministic subprocess, so a nested command's exit code does not reliably propagate to Crew's own task status; and `kiro-cli` chat stdout legitimately mixes narration, tool-output echoes, and the final structured result in one stream. Both are solved the same way: reviewers and the Remediator each persist their own already-decided result through a narrow, deterministic script they invoke directly, writing a dedicated, path-confined artifact — never trusting Crew's task status or parsed chat stdout as proof of anything.
 
 ## What is deterministic
 
@@ -33,7 +35,9 @@ AI judgment is not deterministic, and this project doesn't pretend otherwise —
 
 ## Human-in-the-loop safety
 
-ChangeGuard cannot modify `terraform/main.tf` until a real, explicit approval is granted through the Kiro Crew Gateway's approval dashboard — this is a genuine blocking gate, not a formality. The reject path was verified live as well: rejecting the approval leaves Terraform completely unchanged, the Remediator never runs, and no downstream remediation, re-review, or final verdict step executes at all.
+ChangeGuard cannot modify `terraform/main.tf` until a real, explicit approval is granted through the Kiro Crew Gateway's approval dashboard, or through the optional Control Room web UI — either is a genuine blocking gate, not a formality. The reject path was verified live as well: rejecting the approval leaves Terraform completely unchanged, the Remediator never runs, and no downstream remediation, re-review, or final verdict step executes at all.
+
+The Control Room (`apps/control-room/`) is a small, optional browser UI over the same workflow. All Gateway authentication happens server-side — the browser never receives the Gateway's session cookie, dashboard link token, or internal secret. Approving from the UI relays through that server-side proxy to the exact same `force_approval`/approvals mechanism the CLI and dashboard use; it never simulates or fabricates a decision.
 
 ## Supported MVP rules
 
@@ -53,7 +57,11 @@ make baseline
 make demo-rel
 ```
 
-Run the ChangeGuard review, approve the remediation in the Kiro Crew Gateway dashboard, and watch the remediation and re-review happen — ending in `SAFE_TO_SHIP`. Full instructions are in `README.md`; a minute-by-minute presenter script is in `docs/demo-script.md`.
+Run the ChangeGuard review, approve the remediation in the Kiro Crew Gateway dashboard (or the optional Control Room UI), and watch the remediation and re-review happen — ending in `SAFE_TO_SHIP`. Full instructions are in `README.md`; a minute-by-minute presenter script is in `docs/demo-script.md`.
+
+## Live validation
+
+This isn't just a design on paper. The full REL-001 path — candidate `desired_count` 3→1, `FAIL`/`REL-001`, `CHANGE_BLOCKED`, a genuine pending approval, approval through the Control Room UI, remediation restoring `desired_count` to 3, a real remediated plan, `PASS`/`PASS` re-review, `SAFE_TO_SHIP` — was run end to end against a real Kiro Crew Gateway, with the browser confirmed to never receive any Gateway credential. At the same point: 111 Control Room tests passed, 286 core tests passed (24 live-only skipped).
 
 ## Key result
 
