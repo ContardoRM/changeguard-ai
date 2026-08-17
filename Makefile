@@ -15,7 +15,7 @@
 # genuine and explicit, exactly as designed. See `make help` and
 # design.md's "Five-Minute Demo Walkthrough" for the full flow.
 
-.PHONY: setup baseline demo-rel demo-sec reset test test-live help
+.PHONY: setup baseline candidate remediated demo-rel demo-sec reset test test-live help
 
 PYTHON := python3
 TERRAFORM_DIR := terraform
@@ -28,6 +28,10 @@ help:
 	@echo "                   kiro-cli, kirocrew). Installs nothing."
 	@echo "  make baseline    Generate artifacts/baseline-plan.json from the safe"
 	@echo "                   terraform/main.tf. Never runs terraform apply."
+	@echo "  make candidate   Generate artifacts/candidate-plan.json from the"
+	@echo "                   current terraform/main.tf. Never runs terraform apply."
+	@echo "  make remediated  Generate artifacts/remediated-plan.json from the"
+	@echo "                   current terraform/main.tf. Never runs terraform apply."
 	@echo "  make demo-rel    Edit terraform/main.tf to the REL-001 candidate"
 	@echo "                   scenario (desired_count 3 -> 1) and print the next"
 	@echo "                   command to run the ChangeGuard review."
@@ -75,6 +79,16 @@ baseline:
 	@echo "Generating artifacts/baseline-plan.json from the safe $(TERRAFORM_DIR)/main.tf..."
 	$(PYTHON) scripts/run_tf_plan.py --terraform-dir $(TERRAFORM_DIR) --output $(ARTIFACTS_DIR)/baseline-plan.json
 	@echo "Baseline plan written to $(ARTIFACTS_DIR)/baseline-plan.json."
+
+candidate:
+	@echo "Generating artifacts/candidate-plan.json from the current $(TERRAFORM_DIR)/main.tf..."
+	$(PYTHON) scripts/run_tf_plan.py --terraform-dir $(TERRAFORM_DIR) --output $(ARTIFACTS_DIR)/candidate-plan.json
+	@echo "Candidate plan written to $(ARTIFACTS_DIR)/candidate-plan.json."
+
+remediated:
+	@echo "Generating artifacts/remediated-plan.json from the current $(TERRAFORM_DIR)/main.tf..."
+	$(PYTHON) scripts/run_tf_plan.py --terraform-dir $(TERRAFORM_DIR) --output $(ARTIFACTS_DIR)/remediated-plan.json
+	@echo "Remediated plan written to $(ARTIFACTS_DIR)/remediated-plan.json."
 
 demo-rel:
 	@echo "Preparing the REL-001 demo scenario (desired_count 3 -> 1)..."

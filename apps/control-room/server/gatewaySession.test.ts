@@ -12,8 +12,11 @@ import {
   type HttpRequestFn,
 } from "./gatewaySession";
 
+// Entirely synthetic (not a real signed token from any gateway instance,
+// live or otherwise) -- shaped like a JWT-style link token purely so
+// parseLinkTokenFromCliOutput()'s regex has a realistic string to match.
 const SAMPLE_LINK_TOKEN =
-  "eyJzdWIiOiJsb2NhbC1hcHAiLCJleHAiOjE3ODY5MTc2OTV9.hXk2uREQCVhGgobrNVorhy6ftiqAiEWeBVCXGRyov-0";
+  "eyJzdWIiOiJ0ZXN0LWZpeHR1cmUiLCJleHAiOjB9.synthetic-fixture-signature-not-a-real-token";
 
 describe("buildMintTokenArgs", () => {
   it("returns a fixed argv array naming the exact CLI subcommand and port, never a shell string", () => {

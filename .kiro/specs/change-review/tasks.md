@@ -48,9 +48,9 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - _Requirements: 9.3, 9.5, 9.7, 12.7_
     - Implemented in `scripts/apply_remediation.py` (deterministic stdlib brace-counting/regex parsing scoped to the fixed demo Terraform structure — no external HCL parser, no unrestricted global search-and-replace) and `tests/test_apply_remediation.py` (27 tests, all operating on temporary copies of `terraform/main.tf`, never the repository baseline). Covers all four mandatory positive scenarios (SEC-001, SEC-002, REL-001, BR-001, each asserting the unrelated attribute/ingress block and unrelated file content are byte-for-byte unchanged) and all seven mandatory negative scenarios (unsupported rule ID, wrong resource for a supported rule, malformed restore value, missing target resource, missing target attribute/ingress block, already-remediated no-op target, and ambiguous/duplicate targets) — every negative case asserts `main.tf` content is identical before and after the rejected call. Writes are atomic (temp file + `os.replace`) so no partially written `main.tf` can ever be observed.
 
-- [ ] 3. Checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 3. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 4. Implement the Security Reviewer evidence-extraction module (`scripts/security_rules.py`) and its tests
+- [x] 4. Implement the Security Reviewer evidence-extraction module (`scripts/security_rules.py`) and its tests
   - [x] 4.1 Implement SEC-001 evidence extraction
     - Read `resource_changes[]` where `.address == "aws_security_group.payments_sg"`, then `.change.after.ingress[]`, matching the entry where `from_port <= 22 <= to_port` and `protocol` is `"tcp"` or `"-1"`
     - Return a plain evidence record `{resource, baseline: {cidr_blocks: [...]}, candidate: {cidr_blocks: [...]}}` when both the Baseline Plan and the Candidate/Remediated Plan contain a matching entry
@@ -73,7 +73,7 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - This test module depends on both the evidence-extraction functions (Task 4.1, 4.2) and the Security Reviewer's judgment logic (Task 8.1) — see the Task Dependency Graph
     - _Requirements: 3.1, 3.2, 3.3, 3.4, 5.1, 5.5, 5.6, 5.9, 5.10, 5.11, 12.3, 12.4, 12.10_
 
-- [ ] 5. Implement the Reliability Reviewer evidence-extraction module (`scripts/reliability_rules.py`) and its tests
+- [x] 5. Implement the Reliability Reviewer evidence-extraction module (`scripts/reliability_rules.py`) and its tests
   - [x] 5.1 Implement REL-001 evidence extraction
     - Read `resource_changes[]` where `.address == "aws_ecs_service.payments_api"`, then `.change.after.desired_count`
     - Return a plain evidence record `{resource, baseline: {desired_count: <int>}, candidate: {desired_count: <int>}}` when both plans contain the field with the expected type
@@ -115,9 +115,9 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - _Requirements: 5.6, 5.9, 6.6, 6.9, 12.10_
     - Note: implemented at the evidence-extraction layer only, per the phase's architectural boundary — extraction returns a structural `EvidenceStatus` (`MISSING_RESOURCE` / `MISSING_FIELD` / `MALFORMED`), never `INCOMPLETE` itself. Additional fixture variants (`candidate_missing_resource_{security,reliability}.json`, `candidate_missing_field_{security,reliability}.json`, `candidate_malformed_reliability_int_for_bool.json`, `invalid_json.json`) were added beyond the two named here to cover each distinct evidence-status outcome independently.
 
-- [ ] 7. Checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 7. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 8. Define the Security Reviewer and Reliability Reviewer Kiro Crew agents (`.kiro/agents/`) and their rule-judgment logic
+- [x] 8. Define the Security Reviewer and Reliability Reviewer Kiro Crew agents (`.kiro/agents/`) and their rule-judgment logic
   - [x] 8.1 Author the Security Reviewer agent definition
     - Read-only permission boundary: no file-write tool, no Terraform-execution tool, no remediation-script-invocation tool
     - Scope instructions restricted to `SEC-001`/`SEC-002`; for each rule, invokes `scripts/security_rules.py`'s evidence-extraction function against the two artifact paths supplied by the Orchestrator, receiving back either a plain evidence record or an evidence-unavailable/malformed signal
@@ -182,7 +182,7 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
     - A `force_approval` task with no Gateway approval handler attached (i.e., run via bare `kirocrew run`) must fail closed, never auto-proceed — bare `kirocrew run` must not be used as, or advertised as, the Human Approval demo path
     - _Requirements: 7.1, 7.2, 7.3, 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 10.1, 10.2, 10.3, 10.4, 10.5, 10.6_
 
-- [ ] 12. Checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 12. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
 - [x] 13. Write `tests/test_baseline_pass.py`
   - [x] 13.1 Implement the safe-baseline PASS test
@@ -204,18 +204,18 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
 
   > Task 14.1 depends only on the completed `run_tf_plan.py` and `apply_remediation.py` scripts (Tasks 1-2) and does not depend on the agent definitions or Kiro Crew wiring (Tasks 8-11). Task 14.2 additionally depends on the Security Reviewer and Reliability Reviewer agent definitions (Tasks 8.1, 8.2), since asserting a `PASS` verdict requires invoking each reviewer's judgment logic, not just its evidence-extraction module.
 
-- [ ] 15. Checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 15. Checkpoint - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 16. Write the end-to-end workflow verification test
-  - [ ]* 16.1 Implement `tests/test_end_to_end_workflow.py`
+- [x] 16. Write the end-to-end workflow verification test
+  - [x]* 16.1 Implement `tests/test_end_to_end_workflow.py`
     - Guard with `unittest.skipUnless(shutil.which("terraform"), ...)` for the real-Terraform portions
     - For each of the four rule IDs (`SEC-001`, `SEC-002`, `REL-001`, `BR-001`) in turn: generate a baseline plan, apply the corresponding candidate transition to a temporary copy of `terraform/main.tf`, generate a candidate plan, run both reviewers' judgment logic (Tasks 8.1, 8.2) and assert a `CHANGE_BLOCKED`-equivalent result (one `FAIL` with the expected `rule_id`), simulate approval, invoke `apply_remediation.py`, generate a remediated plan, and assert both reviewers return `PASS` (`SAFE_TO_SHIP`-equivalent)
     - Additionally exercise the rejection path once: given a `CHANGE_BLOCKED`-equivalent result, simulate rejection and assert `terraform/main.tf` is left unmodified and `apply_remediation.py` is never invoked (`REMEDIATION_REJECTED`-equivalent)
     - This test supplements, and does not replace, the mandatory fixture/integration test modules from Tasks 4, 5, 13, and 14 — it specifically validates the full baseline→candidate→blocked→approve→remediate→remediated→verdict wiring across all four rule IDs plus the rejection branch, per Requirement 13's judge walkthrough. Per Requirement 12.11, this is the one test in the suite that may remain optional, because it requires runtime agent behavior that is difficult to automate reliably
     - _Requirements: 12.11, 13.1, 13.2, 8.5, 8.6, 9.7, 10.3, 10.4, 10.5, 10.6_
 
-- [ ] 17. Add Makefile convenience targets
-  - [ ] 17.1 Add `make` targets for the demo commands
+- [x] 17. Add Makefile convenience targets
+  - [x] 17.1 Add `make` targets for the demo commands
     - `baseline`: run `run_tf_plan.py --terraform-dir terraform --output artifacts/baseline-plan.json`
     - `candidate`: run `run_tf_plan.py --terraform-dir terraform --output artifacts/candidate-plan.json`
     - `remediated`: run `run_tf_plan.py --terraform-dir terraform --output artifacts/remediated-plan.json`
@@ -231,7 +231,7 @@ This plan implements exactly the MVP architecture approved in `design.md`: two d
 
   > Tasks 17.1 and 18.1 depend only on the CLI contracts fixed in Tasks 1-2 (flags, artifact paths) and are independent of every agent/hook implementation detail in Tasks 8-11; they can proceed in parallel with each other and with Tasks 8-16 once Tasks 1-2 are complete.
 
-- [ ] 19. Final checkpoint - Ensure all tests pass, ask the user if questions arise.
+- [x] 19. Final checkpoint - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
 
