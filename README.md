@@ -220,3 +220,20 @@ apps/control-room/         # optional browser UI (see Control Room section above
 ## Built with Kiro
 
 This project's core mechanism is Kiro, end to end: two independent Kiro CLI reviewer agents own all policy judgment; a restricted Remediator agent executes (never decides) an already-approved fix; a Kiro Crew YAML DAG drives real concurrent scheduling and the human-approval gate; and every agent operates inside an explicit Kiro permission/safety boundary — narrow shell allow-lists, a `preToolUse` safety hook blocking `terraform apply`/`destroy`/AWS CLI/destructive filesystem commands, and no agent ever holds a generic file-write tool.
+
+## Third-party software, costs, and access
+
+ChangeGuard AI uses open-source tooling including Terraform, the HashiCorp
+AWS provider, React, Vite, TypeScript, Vitest, jsdom, and Testing Library.
+
+Kiro CLI and Kiro Crew are required for the live agent workflow.
+
+No AWS account, AWS credentials, paid cloud infrastructure, database,
+LocalStack, or Docker are required to run the project.
+
+The deterministic test suite can be executed locally without consuming
+Kiro agent usage:
+
+```bash
+make test
+```
